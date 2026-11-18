@@ -78,6 +78,7 @@ import { LogicalSize, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi
 import { keepCentred, pageFitScale, planWindowFit, VIEWER_PADDING } from "./window-fit";
 import { mountWindowControls } from "./window-controls";
 import { InfoPanel } from "./info-panel";
+import { SmoothWheelScroller, normalizeWheelDelta } from "./wheel-scroll";
 import { tempDir, basename } from "@tauri-apps/api/path";
 import { ask } from "@tauri-apps/plugin-dialog";
 
@@ -2028,18 +2029,36 @@ document.getElementById("viewer-scroll")!.addEventListener("mouseup", () => {
   }, 0);
 });
 
-// ── Ctrl+wheel zoom ───────────────────────────────────────────────────────────
+// ── Wheel smooth scrolling & Ctrl+wheel zoom ──────────────────────────────────
 
-document.getElementById("viewer-scroll")!.addEventListener("wheel", async (e: WheelEvent) => {
-  if (!e.ctrlKey && viewer.scrollMode === "horizontal" && !e.shiftKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-    // A plain mouse wheel moves along the row of pages.
-    e.preventDefault();
-    const el = e.currentTarget as HTMLElement;
-    const lines = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? el.clientWidth : 1;
-    el.scrollLeft += e.deltaY * lines;
+const viewerScrollEl = document.getElementById("viewer-scroll")!;
+const wheelScroller = new SmoothWheelScroller(viewerScrollEl);
+
+viewerScrollEl.addEventListener("wheel", async (e: WheelEvent) => {
+  if (e.defaultPrevented) return;
+  if (!e.ctrlKey && !e.metaKey) {
+    if (!viewer.isLoaded()) return;
+    const { dx, dy, discrete } = normalizeWheelDelta({
+      deltaX: e.deltaX,
+      deltaY: e.deltaY,
+      deltaMode: e.deltaMode,
+      shiftKey: e.shiftKey,
+      horizontalMode: viewer.scrollMode === "horizontal",
+      clientWidth: viewerScrollEl.clientWidth,
+      clientHeight: viewerScrollEl.clientHeight,
+    });
+    if (dx === 0 && dy === 0) return;
+    if (discrete || wheelScroller.isAnimating) {
+      e.preventDefault();
+      wheelScroller.scrollBy(dx, dy);
+    } else if (viewer.scrollMode === "horizontal" && !e.shiftKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault();
+      viewerScrollEl.scrollLeft += dx;
+    }
     return;
   }
   if (!e.ctrlKey || !viewer.isLoaded()) return;
+  wheelScroller.cancel();
   e.preventDefault();
   // Smooth zoom around the mouse: while the wheel turns, the pages already
   // drawn are only stretched; they are redrawn sharp once it stops.

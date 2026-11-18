@@ -165,6 +165,31 @@ export async function resolveDestination(
   return { page: pageNumber, point };
 }
 
+// ── Shared text measurement cache ─────────────────────────────────────────────
+
+const MEASURE_FONT_SIZE = 100;
+const UNIT_WIDTH_CACHE_LIMIT = 4000;
+const unitWidthCache = new Map<string, number>();
+let sharedMeasureCtx: CanvasRenderingContext2D | null = null;
+
+function measureSansTextWidth(text: string, fontSizePx: number): number {
+  let widthAt100 = unitWidthCache.get(text);
+  if (widthAt100 === undefined) {
+    if (!sharedMeasureCtx) {
+      const ctx = document.createElement("canvas").getContext("2d");
+      if (!ctx) return 0;
+      ctx.font = `${MEASURE_FONT_SIZE}px sans-serif`;
+      sharedMeasureCtx = ctx;
+    }
+    widthAt100 = sharedMeasureCtx.measureText(text).width;
+    if (text.length <= 200) {
+      if (unitWidthCache.size >= UNIT_WIDTH_CACHE_LIMIT) unitWidthCache.clear();
+      unitWidthCache.set(text, widthAt100);
+    }
+  }
+  return widthAt100 * (fontSizePx / MEASURE_FONT_SIZE);
+}
+
 // ── PdfPageView ───────────────────────────────────────────────────────────────
 
 export class PdfPageView {
@@ -278,6 +303,7 @@ export class PdfPageView {
       this.canvas.style.width  = `${cssW}px`;
       this.canvas.style.height = `${cssH}px`;
       this.canvas.getContext("2d")!.drawImage(buf, 0, 0);
+      buf.width = buf.height = 0;
 
       // Size annotation canvas (no content to preserve here).
       this.annotationCanvas.width  = pxW;
@@ -336,7 +362,6 @@ export class PdfPageView {
 
     const textContent = await page.getTextContent();
     const fragment = document.createDocumentFragment();
-    const measureCtx = document.createElement("canvas").getContext("2d")!;
 
     for (const rawItem of textContent.items) {
       if (!("str" in rawItem)) continue;
@@ -372,8 +397,7 @@ export class PdfPageView {
       span.style.setProperty("user-select",        "text");
       span.style.setProperty("-webkit-user-select", "text");
 
-      measureCtx.font = `${fontSizePx}px sans-serif`;
-      const measured = measureCtx.measureText(item.str).width;
+      const measured = measureSansTextWidth(item.str, fontSizePx);
       const scaleX   = measured > 0.5 ? widthPx / measured : 1;
 
       const transforms: string[] = [];
@@ -440,116 +464,114 @@ export class PdfPageView {
     this.linkLayer.style.width  = `${viewport.width}px`;
     this.linkLayer.style.height = `${viewport.height}px`;
 
-    // Collect text span positions for URL detection
-    const mc = document.createElement("canvas").getContext("2d")!;
-    const measure = (text: string, span: HTMLSpanElement): number => {
-      mc.font = `${span.style.fontSize} ${span.style.fontFamily || "sans-serif"}`;
-      return mc.measureText(text).width;
-    };
-
-    interface SpanEntry {
-      span: HTMLSpanElement;
-      start: number;
-      end: number;
-      text: string;
-      pivotX: number;   // canvas x of text origin (= CSS left)
-      pivotY: number;   // canvas y of text origin (= CSS top + fontSize)
-      top: number;      // CSS top (used for line-break detection only)
-      fontSize: number;
-      angle: number;    // CSS rotation in degrees (from transform:rotate())
-    }
     type Rect = { left: number; top: number; right: number; bottom: number };
-
-    let combined = "";
-    const entries: SpanEntry[] = [];
-    const lineBreakPos = new Set<number>();
-    let prevTop = NaN;
-
-    for (const span of this.textLayer.querySelectorAll("span") as NodeListOf<HTMLSpanElement>) {
-      const text = span.textContent ?? "";
-      if (!text) continue;
-      const spanTop  = parseFloat(span.style.top)      || 0;
-      const fontSize = parseFloat(span.style.fontSize) || 12;
-      if (combined.length > 0 && Math.abs(spanTop - prevTop) > 2) {
-        lineBreakPos.add(combined.length);
-        combined += " ";
-      }
-      const start = combined.length;
-      combined += text;
-      const rotMatch = /rotate\(([+-]?\d+(?:\.\d+)?)deg\)/.exec(span.style.transform || "");
-      entries.push({
-        span,
-        start,
-        end: combined.length,
-        text,
-        pivotX:   parseFloat(span.style.left) || 0,
-        pivotY:   spanTop + fontSize,   // transform-origin is 0% 100% = bottom-left
-        top:      spanTop,
-        fontSize,
-        angle:    rotMatch ? parseFloat(rotMatch[1]) : 0,
-      });
-      prevTop = spanTop;
-    }
-
-    const domRectsForRange = (urlStart: number, urlEnd: number): Rect[] => {
-      const rects: Rect[] = [];
-      for (const e of entries) {
-        if (e.end <= urlStart || e.start >= urlEnd) continue;
-        const urlL = Math.max(e.start, urlStart) - e.start;
-        const urlR = Math.min(e.end,   urlEnd)   - e.start;
-        const dxL = measure(e.text.slice(0, urlL), e.span);
-        const dxR = measure(e.text.slice(0, urlR), e.span);
-        if (dxR <= dxL) continue;
-        if (Math.abs(e.angle) < 0.5) {
-          // No rotation — simple horizontal rect.
-          rects.push({ left: e.pivotX + dxL, top: e.pivotY - e.fontSize,
-                       right: e.pivotX + dxR, bottom: e.pivotY });
-        } else {
-          // Rotate the 4 corners of the URL sub-rect around the pivot and
-          // return the axis-aligned bounding box.
-          const θ = e.angle * Math.PI / 180;
-          const cos = Math.cos(θ), sin = Math.sin(θ);
-          // corners relative to pivot (pivotX, pivotY):
-          //   x axis = text advance direction, y axis = up (−fontSize)
-          const corners: [number, number][] = [
-            [dxL, -e.fontSize], [dxR, -e.fontSize],
-            [dxR, 0],           [dxL, 0],
-          ];
-          const xs = corners.map(([x, y]) => e.pivotX + cos * x - sin * y);
-          const ys = corners.map(([x, y]) => e.pivotY + sin * x + cos * y);
-          rects.push({ left: Math.min(...xs), right: Math.max(...xs),
-                       top:  Math.min(...ys), bottom: Math.max(...ys) });
-        }
-      }
-      return rects;
-    };
-
     interface DomEntry { startPos: number; rects: Rect[] }
-    const urlRe = /https?:\/\/[^\s)\]>"]+/g;
-    let m: RegExpExecArray | null;
     const domLinks = new Map<string, DomEntry>();
 
-    while ((m = urlRe.exec(combined)) !== null) {
-      const urlEnd = m.index + m[0].length;
-      const rects  = domRectsForRange(m.index, urlEnd);
-      if (rects.length > 0 && !domLinks.has(m[0])) {
-        domLinks.set(m[0], { startPos: m.index, rects });
+    // Collect text span positions only if the page text actually contains an HTTP(S) URL.
+    const hasTextUrl = /https?:\/\//i.test(this.textLayer.textContent ?? "");
+    if (hasTextUrl) {
+      interface SpanEntry {
+        span: HTMLSpanElement;
+        start: number;
+        end: number;
+        text: string;
+        pivotX: number;   // canvas x of text origin (= CSS left)
+        pivotY: number;   // canvas y of text origin (= CSS top + fontSize)
+        top: number;      // CSS top (used for line-break detection only)
+        fontSize: number;
+        angle: number;    // CSS rotation in degrees (from transform:rotate())
       }
-      if (!lineBreakPos.has(urlEnd)) continue;
-      for (const e of entries) {
-        if (e.start < urlEnd + 1) continue;
-        if (e.start > urlEnd + 2) break;
-        const fragMatch = /^[^\s)\]>"]+/.exec(e.text);
-        if (!fragMatch) break;
-        const frag = fragMatch[0];
-        if (frag.length >= 2 && frag.length <= 40 && /[./\-_?#=&%]/.test(frag)) {
-          const fullUrl = m[0] + frag;
-          if (!domLinks.has(fullUrl)) {
-            const contRects = domRectsForRange(e.start, e.start + frag.length);
-            domLinks.set(fullUrl, { startPos: m.index, rects: [...rects, ...contRects] });
+
+      let combined = "";
+      const entries: SpanEntry[] = [];
+      const lineBreakPos = new Set<number>();
+      let prevTop = NaN;
+
+      for (const span of this.textLayer.querySelectorAll("span") as NodeListOf<HTMLSpanElement>) {
+        const text = span.textContent ?? "";
+        if (!text) continue;
+        const spanTop  = parseFloat(span.style.top)      || 0;
+        const fontSize = parseFloat(span.style.fontSize) || 12;
+        if (combined.length > 0 && Math.abs(spanTop - prevTop) > 2) {
+          lineBreakPos.add(combined.length);
+          combined += " ";
+        }
+        const start = combined.length;
+        combined += text;
+        const rotMatch = /rotate\(([+-]?\d+(?:\.\d+)?)deg\)/.exec(span.style.transform || "");
+        entries.push({
+          span,
+          start,
+          end: combined.length,
+          text,
+          pivotX:   parseFloat(span.style.left) || 0,
+          pivotY:   spanTop + fontSize,   // transform-origin is 0% 100% = bottom-left
+          top:      spanTop,
+          fontSize,
+          angle:    rotMatch ? parseFloat(rotMatch[1]) : 0,
+        });
+        prevTop = spanTop;
+      }
+
+      const domRectsForRange = (urlStart: number, urlEnd: number): Rect[] => {
+        const rects: Rect[] = [];
+        for (const e of entries) {
+          if (e.end <= urlStart || e.start >= urlEnd) continue;
+          const urlL = Math.max(e.start, urlStart) - e.start;
+          const urlR = Math.min(e.end,   urlEnd)   - e.start;
+          const dxL = measureSansTextWidth(e.text.slice(0, urlL), e.fontSize);
+          const dxR = measureSansTextWidth(e.text.slice(0, urlR), e.fontSize);
+          if (dxR <= dxL) continue;
+          if (Math.abs(e.angle) < 0.5) {
+            // No rotation — simple horizontal rect.
+            rects.push({ left: e.pivotX + dxL, top: e.pivotY - e.fontSize,
+                         right: e.pivotX + dxR, bottom: e.pivotY });
+          } else {
+            // Rotate the 4 corners of the URL sub-rect around the pivot and
+            // return the axis-aligned bounding box.
+            const θ = e.angle * Math.PI / 180;
+            const cos = Math.cos(θ), sin = Math.sin(θ);
+            // corners relative to pivot (pivotX, pivotY):
+            //   x axis = text advance direction, y axis = up (−fontSize)
+            const corners: [number, number][] = [
+              [dxL, -e.fontSize], [dxR, -e.fontSize],
+              [dxR, 0],           [dxL, 0],
+            ];
+            const xs = corners.map(([x, y]) => e.pivotX + cos * x - sin * y);
+            const ys = corners.map(([x, y]) => e.pivotY + sin * x + cos * y);
+            rects.push({ left: Math.min(...xs), right: Math.max(...xs),
+                         top:  Math.min(...ys), bottom: Math.max(...ys) });
           }
         }
-        break;
+        return rects;
+      };
+
+      const urlRe = /https?:\/\/[^\s)\]>"]+/g;
+      let m: RegExpExecArray | null;
+
+      while ((m = urlRe.exec(combined)) !== null) {
+        const urlEnd = m.index + m[0].length;
+        const rects  = domRectsForRange(m.index, urlEnd);
+        if (rects.length > 0 && !domLinks.has(m[0])) {
+          domLinks.set(m[0], { startPos: m.index, rects });
+        }
+        if (!lineBreakPos.has(urlEnd)) continue;
+        for (const e of entries) {
+          if (e.start < urlEnd + 1) continue;
+          if (e.start > urlEnd + 2) break;
+          const fragMatch = /^[^\s)\]>"]+/.exec(e.text);
+          if (!fragMatch) break;
+          const frag = fragMatch[0];
+          if (frag.length >= 2 && frag.length <= 40 && /[./\-_?#=&%]/.test(frag)) {
+            const fullUrl = m[0] + frag;
+            if (!domLinks.has(fullUrl)) {
+              const contRects = domRectsForRange(e.start, e.start + frag.length);
+              domLinks.set(fullUrl, { startPos: m.index, rects: [...rects, ...contRects] });
+            }
+          }
+          break;
+        }
       }
     }
 
@@ -906,9 +928,7 @@ export class PdfViewer {
       await this.pdfDoc.destroy();
       this.pdfDoc = null;
     }
-    this.observer?.disconnect();
-    this._visiblePages.clear();
-    if (this._scrollHandler) { this.scrollEl.removeEventListener("scroll", this._scrollHandler); this._scrollHandler = null; }
+    this._teardownObserver();
 
     const loadingTask = pdfjs.getDocument(password ? { url, password } : { url });
     this.pdfDoc = await loadingTask.promise;
@@ -933,9 +953,7 @@ export class PdfViewer {
 
   buildLayout(): void {
     this._previewScale = null;
-    this.observer?.disconnect();
-    this._visiblePages.clear();
-    if (this._scrollHandler) { this.scrollEl.removeEventListener("scroll", this._scrollHandler); this._scrollHandler = null; }
+    this._teardownObserver();
     this.scrollEl.innerHTML = "";
     this.pageViews = [];
 
@@ -1005,19 +1023,39 @@ export class PdfViewer {
           }
         }
       },
-      { root: this.scrollEl, rootMargin: "200px 200px" }
+      { root: this.scrollEl, rootMargin: "600px 200px" }
     );
 
     for (const pv of this.pageViews) this.observer.observe(pv.wrapper);
 
-    // Scroll listener for accurate current-page tracking
-    this._scrollHandler = () => this._updateFocusedPage();
+    // Scroll listener for accurate current-page tracking (coalesced to animation frames)
+    this._scrollHandler = () => {
+      if (this._scrollRaf !== null) return;
+      this._scrollRaf = requestAnimationFrame(() => {
+        this._scrollRaf = null;
+        this._updateFocusedPage();
+      });
+    };
     this.scrollEl.addEventListener("scroll", this._scrollHandler, { passive: true });
     // Run once to set initial focused page
     this._updateFocusedPage();
   }
 
   private _scrollHandler: (() => void) | null = null;
+  private _scrollRaf: number | null = null;
+
+  private _teardownObserver(): void {
+    this.observer?.disconnect();
+    this._visiblePages.clear();
+    if (this._scrollHandler) {
+      this.scrollEl.removeEventListener("scroll", this._scrollHandler);
+      this._scrollHandler = null;
+    }
+    if (this._scrollRaf !== null) {
+      cancelAnimationFrame(this._scrollRaf);
+      this._scrollRaf = null;
+    }
+  }
 
   private _updateFocusedPage(): void {
     const horizontal = this._scrollMode === "horizontal";
@@ -1315,7 +1353,7 @@ export class PdfViewer {
     for (const view of this.pageViews) {
       if (view.rendered) continue;
       const r = view.wrapper.getBoundingClientRect();
-      if (r.bottom > scrollRect.top - 200 && r.top < scrollRect.bottom + 200 &&
+      if (r.bottom > scrollRect.top - 600 && r.top < scrollRect.bottom + 600 &&
           r.right > scrollRect.left - 200 && r.left < scrollRect.right + 200) {
         void this._renderPage(view);
       }
@@ -1432,9 +1470,7 @@ export class PdfViewer {
   isLoaded(): boolean { return this.pdfDoc !== null; }
 
   async close(): Promise<void> {
-    this.observer?.disconnect();
-    this._visiblePages.clear();
-    if (this._scrollHandler) { this.scrollEl.removeEventListener("scroll", this._scrollHandler); this._scrollHandler = null; }
+    this._teardownObserver();
     this.resizeObserver?.disconnect();
     this.scrollEl.innerHTML = "";
     this.pageViews = [];

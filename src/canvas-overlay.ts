@@ -1795,6 +1795,7 @@ export class CanvasOverlay implements SelectionOwner {
   /** The wheel over a note whose text overflows scrolls the text, not the page (until it ends). */
   private onWheel = (e: WheelEvent): void => {
     if (e.ctrlKey || e.metaKey || e.deltaY === 0 || !this.shown) return;
+    if (!this.committed.some((a) => a.kind === "note")) return;
     const [cx, cy] = this.canvasPoint(e);
     const hit = this.hitTest(cx, cy);
     if (hit?.kind !== "note" || hit === this.editingAnn) return;
