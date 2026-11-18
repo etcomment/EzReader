@@ -7,6 +7,8 @@
 //! The same hook keeps the size of a window that Windows snapped (stretched
 //! to full height, or to a side): moving it afterwards no longer brings
 //! back the size it had before the snap.
+//!
+//! On macOS AppKit keeps the proportions itself (see `macos.rs`).
 
 // The geometry below is only used by the Windows hook (and the tests).
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -100,9 +102,9 @@ mod win {
     use winapi::um::commctrl::{DefSubclassProc, SetWindowSubclass};
     use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
     use winapi::um::winuser::{
-        GetDpiForWindow, GetMonitorInfoW, GetWindowPlacement, GetWindowRect, IsIconic, IsZoomed,
-        MonitorFromWindow, PostMessageW, SetWindowPlacement, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        SW_SHOWNORMAL, WINDOWPLACEMENT, WM_APP, WM_SIZING, WM_WINDOWPOSCHANGED,
+        GetDpiForWindow, GetMonitorInfoW, GetWindowPlacement, GetWindowRect, IsIconic, IsZoomed, MonitorFromWindow,
+        PostMessageW, SetWindowPlacement, MONITORINFO, MONITOR_DEFAULTTONEAREST, SW_SHOWNORMAL, WINDOWPLACEMENT,
+        WM_APP, WM_SIZING, WM_WINDOWPOSCHANGED,
     };
 
     const SUBCLASS_ID: UINT_PTR = 0x457a_5274; // "EzRt"
@@ -243,7 +245,9 @@ pub fn set_ratio_lock(window: &tauri::WebviewWindow, locked: bool) {
     if let Ok(hwnd) = window.hwnd() {
         win::set(hwnd.0 as isize, locked);
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    crate::macos::set_ratio_lock(window, locked);
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (window, locked);
 }
 
@@ -259,7 +263,9 @@ mod tests {
     use super::*;
 
     const R43: f64 = 4.0 / 3.0;
-    fn rect(l: i32, t: i32, r: i32, b: i32) -> Rect { Rect { left: l, top: t, right: r, bottom: b } }
+    fn rect(l: i32, t: i32, r: i32, b: i32) -> Rect {
+        Rect { left: l, top: t, right: r, bottom: b }
+    }
     const BEFORE: Rect = Rect { left: 0, top: 0, right: 800, bottom: 600 };
 
     #[test]

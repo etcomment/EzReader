@@ -1,6 +1,8 @@
 import {
   defaultToolState,
   FONT_FAMILIES,
+  HIGHLIGHT_PRESETS,
+  SYSTEM_FONTS,
   type ActiveToolState,
   type FontFamilyValue,
   type RedactShape,
@@ -56,9 +58,7 @@ const BACKGROUNDS: [string, string][] = [
 const NOTE_COLORS: [string, string][] = [
   ["#fde047", "Yellow"], ["#f9a8d4", "Pink"], ["#93c5fd", "Blue"], ["#86efac", "Green"], ["#fdba74", "Orange"],
 ];
-const HIGHLIGHT_COLORS: [string, string][] = [
-  ["#facc15", "Yellow"], ["#4ade80", "Green"], ["#f472b6", "Pink"], ["#60a5fa", "Blue"], ["#fb923c", "Orange"],
-];
+const HIGHLIGHT_COLORS: [string, string][] = HIGHLIGHT_PRESETS;
 const STAMP_COLORS: [string, string][] = [
   ["#000000", "Black"], ["#1e3a8a", "Ink blue"], ["#16a34a", "Green"], ["#dc2626", "Red"], ["#2563eb", "Blue"],
 ];
@@ -67,6 +67,29 @@ const COLOR_KEYS: Record<string, Key> = {
   White: "colWhite", Pink: "colPink", Orange: "colOrange", "Ink blue": "colInkBlue",
 };
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 60, 72];
+/** Classic pen inks for drawn signatures. */
+const SIGNATURE_INKS: [string, string][] = [
+  ["#18181b", "Black"], ["#1d4ed8", "Blue"], ["#dc2626", "Red"], ["#15803d", "Green"],
+];
+
+/** Pencil brushes: each one is a thickness and an opacity, saved as such in the PDF. */
+export const BRUSHES: { id: string; key: Key; fb: string; width: number; opacity: number }[] = [
+  { id: "ballpoint", key: "brushBallpoint", fb: "Ballpoint pen", width: 1, opacity: 1 },
+  { id: "fineliner", key: "brushFineliner", fb: "Fineliner", width: 2, opacity: 1 },
+  { id: "fountain", key: "brushFountain", fb: "Fountain pen", width: 3, opacity: 1 },
+  { id: "brush", key: "brushBrush", fb: "Brush", width: 6, opacity: 1 },
+  { id: "calligraphy", key: "brushCalligraphy", fb: "Calligraphy", width: 4, opacity: 0.9 },
+  { id: "marker", key: "brushMarker", fb: "Marker", width: 10, opacity: 0.7 },
+  { id: "pencil", key: "brushPencil", fb: "Pencil", width: 1, opacity: 0.6 },
+  { id: "charcoal", key: "brushCharcoal", fb: "Charcoal", width: 5, opacity: 0.55 },
+  { id: "airbrush", key: "brushAirbrush", fb: "Airbrush", width: 12, opacity: 0.25 },
+  { id: "watercolor", key: "brushWatercolor", fb: "Watercolor", width: 8, opacity: 0.4 },
+];
+
+/** The brush with this thickness and opacity, if one has them. */
+export function brushOf(width: number, opacity: number): string | null {
+  return BRUSHES.find((b) => b.width === width && Math.abs(b.opacity - opacity) < 0.005)?.id ?? null;
+}
 
 export interface SignatureChip { id: string; dataUrl: string }
 
@@ -103,9 +126,12 @@ export class ToolRow {
   private titles: [HTMLElement, Key, string][] = [];
   private colorRows: [ColorRow, Key, [string, string][], Key | null][] = [];
   private sliders: [SliderRow, Key, string][] = [];
+  private fontGroups: [HTMLOptGroupElement, Key, string][] = [];
 
   // Text options
   private fontSelect!: HTMLSelectElement;
+  private stdFonts!: HTMLOptGroupElement;
+  private sysFonts!: HTMLOptGroupElement;
   private sizeSelect!: HTMLSelectElement;
   private biuBtns: HTMLButtonElement[] = [];
   private textColor!: ColorRow;
@@ -130,7 +156,12 @@ export class ToolRow {
   private sigList!: HTMLElement;
   private sigNew!: HTMLButtonElement;
   private sigCount!: HTMLElement;
+  private sigInk!: ColorRow;
   private signatures: SignatureChip[] = [];
+  private brushBtns = new Map<string, HTMLButtonElement>();
+  private brushWrap!: HTMLElement;
+  /** Told after every sync: the title of the options on show, or null when none are. */
+  onSync: ((title: string | null, mode: AppMode) => void) | null = null;
 
   constructor(private emit: (e: ToolbarEvent) => void, private canSwitch: () => boolean) {
     this.row = document.createElement("div");
@@ -238,9 +269,10 @@ export class ToolRow {
   }
 
   /** Options of the selected text annotation (or of new text). */
-  showTextStyles(st: Pick<ActiveToolState, "color" | "fontSize" | "bold" | "italic" | "underline"> & { fontFamily?: FontFamilyValue; backgroundColor?: RgbColor | null }): void {
+  showTextStyles(st: Pick<ActiveToolState, "color" | "fontSize" | "bold" | "italic" | "underline"> & { fontFamily?: FontFamilyValue; fontName?: string | null; backgroundColor?: RgbColor | null }): void {
     this.state.color = { ...st.color };
     this.state.fontFamily = st.fontFamily ?? "helvetica";
+    this.state.fontName = st.fontName ?? null;
     this.state.fontSize = st.fontSize;
     this.state.bold = st.bold;
     this.state.italic = st.italic;
@@ -272,11 +304,45 @@ export class ToolRow {
     this.hideSelectionPanel("shapes");
   }
 
+  /** Ink of the selected drawn signature. */
+  showSignatureStyles(color: RgbColor): void {
+    this.state.signatureColor = { ...color };
+    this.selectionPanel = "sign";
+    this.panel = "sign";
+    this.syncAll();
+  }
+
+  hideSignatureStyles(): void { this.hideSelectionPanel("sign"); }
+
+  /** Colour and opacity of the selected highlight annotation. */
+  showHighlightStyles(st: { color: RgbColor; opacity: number }): void {
+    this.state.highlightColor = { ...st.color };
+    this.state.highlightOpacity = st.opacity;
+    this.selectionPanel = "highlight";
+    this.panel = "highlight";
+    this.syncAll();
+  }
+
+  hideHighlightStyles(): void { this.hideSelectionPanel("highlight"); }
+
   /** Number of pages selected in the side panel (Crop and Straighten need some). */
   setPageSelection(count: number): void {
     this.selectedPages = count;
     this.syncPageBtns();
     this.syncHint();
+  }
+
+  /** The fonts of SYSTEM_FONTS installed on this computer. */
+  setSystemFonts(names: string[]): void {
+    this.sysFonts.replaceChildren(...SYSTEM_FONTS.filter((f) => names.includes(f.name)).map((f) => {
+      const o = document.createElement("option");
+      o.value = `sys:${f.name}`;
+      o.textContent = f.name;
+      o.style.fontFamily = `"${f.name}"`;
+      return o;
+    }));
+    this.sysFonts.hidden = this.sysFonts.children.length === 0;
+    this.syncAll();
   }
 
   setSignatures(list: SignatureChip[]): void {
@@ -304,6 +370,7 @@ export class ToolRow {
         noneKey ? this.tr(noneKey, "No background") : undefined, this.tr("optCustomColor", "Custom color"));
     }
     for (const [s, key, fb] of this.sliders) s.setLabel(this.tr(key, fb));
+    for (const [g, key, fb] of this.fontGroups) g.label = this.tr(key, fb);
     this.renderSignatures();
     this.syncPageBtns();
     this.syncHint();
@@ -378,15 +445,25 @@ export class ToolRow {
     this.fontSelect = document.createElement("select");
     this.fontSelect.className = "opt-select";
     this.title(this.fontSelect, "optFont", "Font");
+    // The standard fonts, then the common fonts installed on this computer.
+    this.stdFonts = document.createElement("optgroup");
+    this.fontGroups.push([this.stdFonts, "optFontsStandard", "Standard"]);
     for (const f of FONT_FAMILIES) {
       const o = document.createElement("option");
       o.value = f.value;
       o.textContent = f.label;
       o.style.fontFamily = f.css;
-      this.fontSelect.append(o);
+      this.stdFonts.append(o);
     }
+    this.sysFonts = document.createElement("optgroup");
+    this.fontGroups.push([this.sysFonts, "optFontsInstalled", "On this computer"]);
+    this.sysFonts.hidden = true;
+    this.fontSelect.append(this.stdFonts, this.sysFonts);
     this.fontSelect.addEventListener("change", () => {
-      this.state.fontFamily = this.fontSelect.value as FontFamilyValue;
+      const v = this.fontSelect.value;
+      const sys = v.startsWith("sys:") ? SYSTEM_FONTS.find((f) => f.name === v.slice(4)) : undefined;
+      this.state.fontName = sys ? sys.name : null;
+      this.state.fontFamily = sys ? sys.fallback : v as FontFamilyValue;
       this.changed();
     });
     this.sizeSelect = document.createElement("select");
@@ -430,7 +507,10 @@ export class ToolRow {
     this.textBgWrap = document.createElement("div");
     this.textBgWrap.className = "opt-group";
     this.textBgWrap.append(this.divider(), this.textBg.el);
-    p.append(this.fontSelect, this.sizeSelect, biuSeg, this.divider(), this.textColor.el, this.textBgWrap);
+    const line = document.createElement("div");
+    line.className = "opt-line";
+    line.append(this.sizeSelect, biuSeg);
+    p.append(this.fontSelect, line, this.divider(), this.textColor.el, this.textBgWrap);
   }
 
   /** Pencil and shapes: drawing style, outline, background, thickness, opacity. */
@@ -466,13 +546,58 @@ export class ToolRow {
     fillWrap.append(this.divider(), fill.el);
     if (group === "pencil") this.pencilFillWrap = fillWrap; else this.shapeFillWrap = fillWrap;
 
-    const thick = this.slider(1, 12, " px", "optThickness", "Thickness", (v) => { this.state.strokeWidth = v; this.changed(); });
-    const op = this.slider(10, 100, " %", "optOpacity", "Opacity", (v) => { this.state.opacity = v / 100; this.changed(); });
+    const thick = this.slider(1, 12, " px", "optThickness", "Thickness", (v) => {
+      this.state.strokeWidth = v;
+      this.changed();
+    });
+    const op = this.slider(10, 100, " %", "optOpacity", "Opacity", (v) => {
+      this.state.opacity = v / 100;
+      this.changed();
+    });
     this.outline.push(outline);
     this.fill.push(fill);
     this.thickness.push(thick);
     this.opacity.push(op);
-    p.append(seg, this.divider(), outline.el, fillWrap, this.divider(), thick.el, op.el);
+    if (group === "pencil") {
+      p.append(seg, this.buildBrushes(), this.divider(), outline.el, fillWrap, this.divider(), thick.el, op.el);
+    } else {
+      p.append(seg, this.divider(), outline.el, fillWrap, this.divider(), thick.el, op.el);
+    }
+  }
+
+  /** The brush list of the pencil: a name and a sample stroke each. */
+  private buildBrushes(): HTMLElement {
+    this.brushWrap = document.createElement("div");
+    this.brushWrap.className = "opt-brushes";
+    const label = document.createElement("span");
+    label.className = "opt-label";
+    this.text(label, "optBrush", "Brush");
+    const list = document.createElement("div");
+    list.className = "brush-list";
+    list.setAttribute("role", "listbox");
+    for (const b of BRUSHES) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "brush-item";
+      btn.dataset["brush"] = b.id;
+      btn.setAttribute("role", "option");
+      const name = document.createElement("span");
+      name.className = "brush-name";
+      this.text(name, b.key, b.fb);
+      const sw = Math.min(10, 0.6 + b.width * 0.85);
+      btn.insertAdjacentHTML("beforeend",
+        `<svg class="brush-sample" viewBox="0 0 120 20" preserveAspectRatio="none" aria-hidden="true"><path d="M4 12 C 30 4, 52 16, 78 9 S 108 6, 116 9" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="${sw}" opacity="${b.opacity}"/></svg>`);
+      btn.prepend(name);
+      btn.addEventListener("click", () => {
+        this.state.strokeWidth = b.width;
+        this.state.opacity = b.opacity;
+        this.changed();
+      });
+      this.brushBtns.set(b.id, btn);
+      list.append(btn);
+    }
+    this.brushWrap.append(label, list);
+    return this.brushWrap;
   }
 
   private buildNotePanel(): void {
@@ -505,7 +630,11 @@ export class ToolRow {
     this.sigNew.addEventListener("click", () => this.emit({ type: "signature" }));
     this.sigCount = document.createElement("span");
     this.sigCount.className = "opt-note";
-    p.append(this.sigList, this.sigNew, this.sigCount);
+    this.sigInk = this.colorRow(ICON_OPT_COLOR, "optInk", SIGNATURE_INKS, null, (c) => {
+      if (c) this.state.signatureColor = c;
+      this.changed();
+    });
+    p.append(this.sigList, this.sigNew, this.sigCount, this.divider(), this.sigInk.el);
   }
 
   private buildImagePanel(): void {
@@ -606,7 +735,16 @@ export class ToolRow {
     this.textBgWrap.hidden = editText;
 
     const st = this.state;
-    this.fontSelect.value = st.fontFamily;
+    this.fontSelect.value = st.fontName ? `sys:${st.fontName}` : st.fontFamily;
+    if (st.fontName && this.fontSelect.value !== `sys:${st.fontName}`) {
+      // A font of another computer (from an opened file): shown, kept as is.
+      const o = document.createElement("option");
+      o.value = `sys:${st.fontName}`;
+      o.textContent = st.fontName;
+      this.sysFonts.append(o);
+      this.sysFonts.hidden = false;
+      this.fontSelect.value = o.value;
+    }
     this.sizeSelect.value = String(st.fontSize);
     if (this.sizeSelect.value !== String(st.fontSize)) {
       // A size not in the list (from an existing annotation): show it anyway.
@@ -631,11 +769,25 @@ export class ToolRow {
       b.classList.toggle("active", style === current);
     }
     this.stampColor.set(st.stampColor);
+    this.sigInk.set(st.signatureColor);
+    const brush = brushOf(st.strokeWidth, st.opacity);
+    for (const [id, b] of this.brushBtns) {
+      const on = id === brush;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", String(on));
+    }
     // Straight lines and arrows have no inside to fill.
     this.pencilFillWrap.hidden = this.pencilStyle !== "ink" && this.selectionPanel !== "pencil";
     this.shapeFillWrap.hidden = this.shapeStyle === "arrow" && this.selectionPanel !== "shapes";
+    // Brushes are for free drawing.
+    this.brushWrap.hidden = this.pencilStyle !== "ink" && this.selectionPanel !== "pencil";
     this.syncHint();
+    const title = show && shown ? shown.querySelector(".opt-title")?.textContent ?? null : null;
+    this.onSync?.(title, this.mode);
   }
+
+  /** The tool hint of the moment (shown when no options are). */
+  get hintText(): string { return this.hint.textContent ?? ""; }
 
   private syncHint(): void {
     const hints: Record<ToolGroup, [Key, string]> = {

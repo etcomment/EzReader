@@ -1,4 +1,5 @@
 import * as pdfjs from "pdfjs-dist";
+import { SAFE_PDF } from "./pdf-options";
 import type { TextItem } from "pdfjs-dist/types/src/display/api";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { bodySize, layoutPage, normalizeHeadings, type TextDoc, type TextRun } from "./text-layout";
@@ -9,7 +10,7 @@ import { bodySize, layoutPage, normalizeHeadings, type TextDoc, type TextRun } f
  * without lines.
  */
 export async function extractText(filePath: string, pages: number[], title: string): Promise<TextDoc> {
-  const doc = await pdfjs.getDocument({ url: convertFileSrc(filePath) + `?t=${Date.now()}` }).promise;
+  const doc = await pdfjs.getDocument({ ...SAFE_PDF, url: convertFileSrc(filePath) + `?t=${Date.now()}` }).promise;
   try {
     const read: { n: number; runs: TextRun[]; width: number; height: number }[] = [];
     for (const n of pages) {
@@ -32,6 +33,6 @@ export async function extractText(filePath: string, pages: number[], title: stri
     normalizeHeadings(laid);
     return { title, pages: laid };
   } finally {
-    await doc.destroy();
+    await doc.loadingTask.destroy();
   }
 }

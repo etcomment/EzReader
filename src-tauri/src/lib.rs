@@ -1,10 +1,20 @@
 mod commands;
 mod convert;
+#[cfg(test)]
+mod corpus_tests;
 mod error;
 mod fsutil;
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 mod grants;
+#[cfg(test)]
+mod hostile_input_tests;
+#[cfg(target_os = "macos")]
+mod macos;
 mod ocr;
 mod pdf;
+#[cfg(not(any(windows, target_os = "macos")))]
+mod rapid_ocr;
 mod ratio_lock;
 mod resize_border;
 mod tempfiles;
@@ -16,7 +26,7 @@ use std::sync::Mutex;
 
 use tauri::{DragDropEvent, Manager, WindowEvent};
 
-#[derive(Debug, Default, Clone, serde::Serialize)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartupArgs {
     pub file_path: Option<String>,
@@ -24,6 +34,19 @@ pub struct StartupArgs {
     /// The file is a temp copy that was never saved (pages dragged out to a
     /// new window): Save asks where to write it.
     pub unsaved: bool,
+    /// A tab dragged out of another window: the file is a temp copy holding
+    /// its edits, and Save writes back to this path, its real file.
+    #[serde(default)]
+    pub save_path: Option<String>,
+    /// That tab had unsaved changes.
+    #[serde(default)]
+    pub dirty: bool,
+    /// The password of a protected document moved from another window.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// The page the tab showed (1-based; 0: the first).
+    #[serde(default)]
+    pub page: u32,
 }
 
 /**
@@ -38,7 +61,8 @@ fn fit_to_screen(window: &tauri::WebviewWindow) -> tauri::Result<()> {
     let inner = window.inner_size()?;
     let k = fit_scale((outer.width, outer.height), (area.size.width, area.size.height));
     let (w, h) = if k < 1.0 {
-        let size = tauri::PhysicalSize::new((inner.width as f64 * k).round() as u32, (inner.height as f64 * k).round() as u32);
+        let size =
+            tauri::PhysicalSize::new((inner.width as f64 * k).round() as u32, (inner.height as f64 * k).round() as u32);
         window.set_size(size)?;
         ((outer.width as f64 * k).round() as i64, (outer.height as f64 * k).round() as i64)
     } else {
@@ -57,6 +81,9 @@ fn fit_scale(size: (u32, u32), area: (u32, u32)) -> f64 {
 
 pub struct AppState {
     pub startup_args: Mutex<StartupArgs>,
+    /// The main window has read `startup_args`: later files go to it as
+    /// events.
+    pub startup_taken: std::sync::atomic::AtomicBool,
     /// What each extra window opens, by window label.
     pub window_args: Mutex<HashMap<String, StartupArgs>>,
 }
@@ -96,6 +123,8 @@ pub fn run() {
             // Temp files left by an EzReader that crashed: removed in the
             // background, so a big leftover never delays the window.
             std::thread::spawn(tempfiles::sweep_leftovers);
+            // The previous exe a portable update renamed out of the way.
+            std::thread::spawn(commands::update::remove_leftover);
             if let Some(path) = &startup_file {
                 allow_viewing(app, path);
             }
@@ -117,10 +146,12 @@ pub fn run() {
         })
         .manage(AppState {
             startup_args: Mutex::new(startup),
+            startup_taken: std::sync::atomic::AtomicBool::new(false),
             window_args: Mutex::new(HashMap::new()),
         })
         .manage(commands::compress::CompressCancel::default())
         .invoke_handler(tauri::generate_handler![
+            commands::pdf::list_system_fonts,
             commands::compress::compress_pdf,
             commands::compress::cancel_compression,
             commands::compress::estimate_compression,
@@ -157,23 +188,80 @@ pub fn run() {
             commands::shell::print_pages,
             commands::shell::get_startup_args,
             commands::shell::check_pdf_association,
+            commands::shell::is_default_pdf_reader,
             commands::shell::register_pdf_handler,
             commands::shell::unregister_pdf_handler,
             commands::shell::register_print_verb,
             commands::shell::open_default_apps_settings,
             commands::shell::open_url,
+            commands::update::check_for_update,
+            commands::update::install_update,
             commands::window::open_pages_in_new_window,
+            commands::window::open_file_in_new_window,
             commands::window::pictures_to_new_pdf,
+            commands::window::tab_drag_hover,
+            commands::window::tab_drag_end,
+            commands::window::move_tab,
             ratio_lock::set_launcher_ratio_lock,
             resize_border::set_resize_border,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, event| {
+            // Documents opened from the Finder (double click, "Open With",
+            // dropped on the Dock icon) come as an event, not on the
+            // command line.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                open_from_finder(_app, urls);
+            }
             if let tauri::RunEvent::Exit = event {
                 tempfiles::remove_own();
             }
         })
+}
+
+/// Where the macOS window buttons sit, in logical pixels: centred on the
+/// 36 px menu row (see `body.mac` in app.css).
+#[cfg(target_os = "macos")]
+pub(crate) const TRAFFIC_LIGHTS: (f64, f64) = (14.0, 18.0);
+
+/// The first file opens in the main window (on launch, or when the page
+/// takes it: see `open-files` in main.ts), the others in windows of their own.
+#[cfg(target_os = "macos")]
+fn open_from_finder(app: &tauri::AppHandle, urls: &[url::Url]) {
+    use tauri::Emitter;
+
+    let paths: Vec<String> =
+        urls.iter().filter_map(|u| u.to_file_path().ok()).map(|p| p.to_string_lossy().into_owned()).collect();
+    let Some((first, rest)) = paths.split_first() else { return };
+    for p in &paths {
+        allow_viewing(app, p);
+    }
+    let state = app.state::<AppState>();
+    let mut to_page = paths.clone();
+    {
+        let mut startup = state.startup_args.lock().unwrap();
+        if !state.startup_taken.load(std::sync::atomic::Ordering::SeqCst) && startup.file_path.is_none() {
+            // Launched by this file: the window has not asked yet.
+            startup.file_path = Some(first.clone());
+            to_page = rest.to_vec();
+            if let Some(main) = app.get_webview_window("main") {
+                ratio_lock::set_ratio_lock(&main, false);
+            }
+        }
+    }
+    if to_page.is_empty() {
+        return;
+    }
+    if app.get_webview_window("main").is_some() && state.startup_taken.load(std::sync::atomic::Ordering::SeqCst) {
+        let _ = app.emit_to("main", "open-files", to_page);
+    } else {
+        for p in to_page {
+            let args = StartupArgs { file_path: Some(p), ..Default::default() };
+            let _ = commands::window::open_window(app, args, None);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -185,7 +273,10 @@ mod icon_tests {
     fn the_window_icon_is_the_biggest_image_of_icon_ico() {
         let d = include_bytes!("../icons/icon.ico");
         let count = u16::from_le_bytes([d[4], d[5]]) as usize;
-        let side = |i: usize| match d[6 + 16 * i] { 0 => 256, w => u32::from(w) };
+        let side = |i: usize| match d[6 + 16 * i] {
+            0 => 256,
+            w => u32::from(w),
+        };
         assert!(count > 1);
         assert_eq!(side(0), (0..count).map(side).max().unwrap());
     }

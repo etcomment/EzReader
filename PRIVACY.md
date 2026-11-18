@@ -1,6 +1,6 @@
 # EzReader privacy policy
 
-*Effective 15 November 2026*
+*Effective 16 November 2026*
 
 EzReader is a PDF reader and editor that works entirely on your computer. This policy explains what that means for your data.
 
@@ -20,11 +20,13 @@ To remember your preferences between sessions, EzReader saves a few settings on 
 
 ## Network access
 
-EzReader does not connect to the internet on its own. The PDF viewer is locked down: documents cannot run scripts or reach the network. A web link opens in your browser only when you click it.
+EzReader makes one connection on its own: when it starts, it asks GitHub (api.github.com) which version is the latest, to show on the welcome screen whether yours is up to date. That request carries nothing but the app's version number; like any web request, GitHub sees your IP address, under [GitHub's privacy statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement). If you click *Update*, EzReader downloads the new version from GitHub's release page and checks it before installing it (the Store version opens the Microsoft Store instead).
+
+Nothing else goes online. The PDF viewer is locked down: documents cannot run scripts or reach the network. A web link opens in your browser only when you click it.
 
 ## Windows features
 
-Text recognition (OCR) uses the engine built into Windows and runs on your computer. EzReader displays pages with Microsoft Edge WebView2, a Windows component. These Windows features are covered by Microsoft's own privacy statement, and EzReader sends them no data of its own.
+Text recognition (OCR), including the automatic reading of scanned pages so their text can be selected, uses the engine built into Windows and runs on your computer. On Linux, it uses text-recognition models built into EzReader, also on your computer. EzReader displays pages with Microsoft Edge WebView2, a Windows component. These Windows features are covered by Microsoft's own privacy statement, and EzReader sends them no data of its own.
 
 If you install EzReader from the Microsoft Store, Microsoft handles the download and installation under its own privacy statement. EzReader does not receive any information about you from the Store.
 

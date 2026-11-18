@@ -6,6 +6,7 @@ import {
   buildRows,
   focusedPageAt,
   resolveDestination,
+  toViewportRect,
   PdfPageView,
   type DestinationDoc,
   type LinkNavigationHandler,
@@ -68,6 +69,13 @@ describe("buildRows", () => {
 
   it("handles exactly matching page count for column count (4 pages, 2 columns)", () => {
     expect(buildRows(4, 2)).toEqual([[1, 2], [3, 4]]);
+  });
+
+  it("places page 1 alone as cover and pairs even-left [2, 3], [4, 5] when evenSpread is true", () => {
+    expect(buildRows(5, 2, true)).toEqual([[1], [2, 3], [4, 5]]);
+    expect(buildRows(4, 2, true)).toEqual([[1], [2, 3], [4]]);
+    expect(buildRows(1, 2, true)).toEqual([[1]]);
+    expect(buildRows(0, 2, true)).toEqual([]);
   });
 });
 
@@ -228,5 +236,79 @@ describe("PdfPageView internal link layer", () => {
 
     links[5].click();
     expect(handler.goToDestination).toHaveBeenCalledWith("multiline");
+  });
+
+  it("tracks rendered scale/rotation, stretches canvas on zoom placeholder resize, and cancels obsolete renders", async () => {
+    stubCanvas2d();
+
+    const makeViewport = (scale: number, rotation: number) => ({
+      width: 600 * scale,
+      height: 800 * scale,
+      rotation,
+      scale,
+      convertToViewportPoint: (x: number, y: number) => [x * scale, (800 - y) * scale],
+      convertToPdfPoint: (x: number, y: number) => [x / scale, 800 - y / scale],
+    }) as unknown as PageViewport;
+
+    let cancelCalls = 0;
+    let pendingResolve: (() => void) | null = null;
+    const fakePage = {
+      rotate: 0,
+      getViewport: ({ scale, rotation }: { scale: number; rotation: number }) => makeViewport(scale, rotation),
+      render: () => {
+        if (pendingResolve) {
+          const p = new Promise<void>((r) => { pendingResolve = r; });
+          return { promise: p, cancel: () => { cancelCalls++; pendingResolve?.(); } };
+        }
+        return { promise: Promise.resolve(), cancel: () => { cancelCalls++; } };
+      },
+      getTextContent: async () => ({ items: [], styles: {} }),
+      getAnnotations: async () => [],
+      cleanup: () => {},
+    } as unknown as PDFPageProxy;
+
+    const fakeDoc = {
+      getPage: async () => fakePage,
+    } as unknown as PDFDocumentProxy;
+
+    const view = new PdfPageView(1, new ToolSelection(), new AnnotationSession());
+    expect(view.isRenderedAt(1, 0, 1)).toBe(false);
+
+    await view.render(fakeDoc, 1, 0, new Map(), () => {});
+    expect(view.isRenderedAt(1, 0, 1)).toBe(true);
+    expect(view.isRenderedAt(1.5, 0, 1)).toBe(false);
+    expect(view.isRenderedAt(1, 90, 1)).toBe(false);
+
+    // Stretching placeholder during zoom keeps existing canvas pixels and updates CSS size
+    view.setPlaceholderSize(900, 1200, true);
+    const canvas = view.wrapper.querySelector<HTMLCanvasElement>(".page-canvas")!;
+    expect(view.hasPixels).toBe(true);
+    expect(canvas.style.width).toBe("900px");
+    expect(canvas.style.height).toBe("1200px");
+
+    // Start an in-flight render that hangs until cancelled, then cancel it and render at scale 2
+    pendingResolve = () => {};
+    const slowRender = view.render(fakeDoc, 1.5, 0, new Map(), () => {});
+    await Promise.resolve();
+    view.cancelRender();
+    expect(cancelCalls).toBe(1);
+    expect(view.hasPixels).toBe(true); // previous bitmap kept on screen
+    await slowRender;
+
+    pendingResolve = null;
+    await view.render(fakeDoc, 2, 0, new Map(), () => {});
+    expect(view.isRenderedAt(2, 0, 1)).toBe(true);
+    const nextCanvas = view.wrapper.querySelector<HTMLCanvasElement>(".page-canvas")!;
+    expect(nextCanvas.width).toBe(1200);
+    expect(nextCanvas.height).toBe(1600);
+  });
+});
+
+describe("toViewportRect", () => {
+  it("maps both corners through the viewport, without normalising", () => {
+    // 90° rotation at scale 2 on a 100×200 page: (x, y) → (2y, 2x).
+    const viewport = { convertToViewportPoint: (x: number, y: number) => [2 * y, 2 * x] };
+    expect(toViewportRect(viewport, [10, 20, 30, 40])).toEqual([40, 20, 80, 60]);
+    expect(toViewportRect(viewport, new Float32Array([30, 40, 10, 20]))).toEqual([80, 60, 40, 20]);
   });
 });

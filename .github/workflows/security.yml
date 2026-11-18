@@ -1,0 +1,125 @@
+name: Security
+
+# SCA (known-vulnerable or unmaintained dependencies), SAST (CodeQL) and
+# dynamic testing (fuzzing the Rust code that opens files).
+#
+# Classic DAST scans a running web server; EzReader is a desktop app with no
+# server or network surface, so its dynamic testing is fuzzing: malformed
+# PDFs and pictures fed to the code that opens them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Mondays: new advisories land on unchanged code, and the fuzzers run longer.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+  # Called by the release workflow: nothing is published if a scan fails.
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  npm-audit:
+    name: SCA - npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: Audit npm dependencies
+        run: npm audit --omit=dev --audit-level=low
+
+  cargo-deny:
+    name: SCA - cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Advisories, licenses and sources of Rust crates
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: src-tauri/Cargo.toml
+          command: check advisories licenses bans sources
+
+  codeql:
+    name: SAST - CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, rust, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: /language:${{ matrix.language }}
+
+  fuzz:
+    name: Dynamic - fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [pdf, picture, ocr_image]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Ubuntu system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+
+      # The toolchain is named here, not taken from the pinned commit's branch:
+      # Dependabot moves the pin to the stable branch.
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: nightly
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri/fuzz
+
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-fuzz
+
+      - name: Seed corpus from the test fixtures
+        working-directory: src-tauri
+        run: |
+          mkdir -p fuzz/corpus/${{ matrix.target }}
+          case "${{ matrix.target }}" in
+            pdf) cp tests/fixtures/*.pdf fuzz/corpus/pdf/ ;;
+            *)   cp tests/fixtures/*.png fuzz/corpus/${{ matrix.target }}/ ;;
+          esac
+
+      # The prebuilt cargo-fuzz is a musl binary and would default to that target.
+      - name: Fuzz (1 min on pushes, 15 min on the weekly run)
+        working-directory: src-tauri
+        run: |
+          SECONDS_TO_RUN=60
+          if [ "${{ github.event_name }}" = "schedule" ]; then SECONDS_TO_RUN=900; fi
+          cargo fuzz run --target x86_64-unknown-linux-gnu --fuzz-dir fuzz ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
+            -max_total_time=$SECONDS_TO_RUN -rss_limit_mb=2048 -timeout=10 -max_len=262144
+
+      - name: Keep the input that crashed
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: src-tauri/fuzz/artifacts/
+          if-no-files-found: ignore

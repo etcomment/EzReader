@@ -1,6 +1,7 @@
 //! Text recognition (OCR): uses the engine built into Windows 10 and 11
-//! (`Windows.Media.Ocr`) on Windows, and Tesseract CLI (`tesseract`) on Linux
-//! and other Unix platforms.
+//! (`Windows.Media.Ocr`) on Windows, the one built into macOS (Vision) on
+//! macOS, and the PaddleOCR models built into the app (see `rapid_ocr`) on
+//! Linux.
 
 use serde::Serialize;
 
@@ -29,7 +30,7 @@ pub struct OcrResult {
     /// The lines, one per line of text.
     pub text: String,
     pub lines: Vec<OcrLine>,
-    /// Tag of the language used (e.g. "fr-FR" on Windows or "fra" on Tesseract).
+    /// Tag of the language used (e.g. "fr-FR" on Windows, "latin" on Linux).
     pub language: String,
 }
 
@@ -43,7 +44,7 @@ pub struct OcrLanguage {
 
 /// Resizes small images up so text reaches a comfortable height, clamps to
 /// `max_side`, and composites transparent pixels over white paper.
-fn prepare_rgba(bytes: &[u8], max_side: u32) -> Result<image::RgbaImage, String> {
+pub(crate) fn prepare_rgba(bytes: &[u8], max_side: u32) -> Result<image::RgbaImage, String> {
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
     let (w, h) = (img.width().max(1), img.height().max(1));
     let side = w.max(h);
@@ -81,18 +82,6 @@ pub fn prepare(bytes: &[u8], max_side: u32) -> Result<(Vec<u8>, u32, u32), Strin
         px.swap(0, 2);
     }
     Ok((bgra, w, h))
-}
-
-/// The prepared picture encoded as PNG bytes, along with its pixel dimensions,
-/// for engines that consume standard image files/streams (such as Tesseract).
-#[cfg_attr(windows, allow(dead_code))]
-pub fn prepare_png(bytes: &[u8], max_side: u32) -> Result<(Vec<u8>, u32, u32), String> {
-    let rgba = prepare_rgba(bytes, max_side)?;
-    let (w, h) = rgba.dimensions();
-    let mut out = Vec::new();
-    rgba.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    Ok((out, w, h))
 }
 
 /// Joins recognized lines into the text shown to the user.
@@ -148,10 +137,7 @@ mod engine {
         let buffer = writer.DetachBuffer().map_err(|e| e.message())?;
         let bitmap = SoftwareBitmap::CreateCopyFromBuffer(&buffer, BitmapPixelFormat::Bgra8, w as i32, h as i32)
             .map_err(|e| e.message())?;
-        let result = engine
-            .RecognizeAsync(&bitmap)
-            .and_then(|op| op.get())
-            .map_err(|e| e.message())?;
+        let result = engine.RecognizeAsync(&bitmap).and_then(|op| op.join()).map_err(|e| e.message())?;
 
         let (fw, fh) = (w as f32, h as f32);
         let mut lines = Vec::new();
@@ -169,301 +155,180 @@ mod engine {
             }
             lines.push(OcrLine { text: line.Text().map(|s| s.to_string()).unwrap_or_default(), words });
         }
-        let language = engine
-            .RecognizerLanguage()
-            .and_then(|l| l.LanguageTag())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        let language =
+            engine.RecognizerLanguage().and_then(|l| l.LanguageTag()).map(|s| s.to_string()).unwrap_or_default();
         Ok(OcrResult { text: join_lines(&lines), lines, language })
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 mod engine {
     use super::*;
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+    use objc2::rc::Retained;
+    use objc2::AnyThread;
+    use objc2_foundation::{NSArray, NSData, NSDictionary, NSError, NSLocale, NSRange, NSString};
+    use objc2_vision::{
+        VNImageRequestHandler, VNRecognizeTextRequest, VNRecognizedText, VNRectangleObservation, VNRequest,
+        VNRequestTextRecognitionLevel,
+    };
 
-    /// Maps a Tesseract language code to a human-readable display name.
-    fn display_name(tag: &str) -> String {
-        match tag {
-            "eng" => "English",
-            "fra" => "Français",
-            "deu" => "Deutsch",
-            "spa" => "Español",
-            "ita" => "Italiano",
-            "por" => "Português",
-            "rus" => "Русский",
-            "ukr" => "Українська",
-            "nld" => "Nederlands",
-            "pol" => "Polski",
-            "tur" => "Türkçe",
-            "ara" => "العربية",
-            "hin" => "हिन्दी",
-            "ben" => "বাংলা",
-            "urd" => "اردو",
-            "ind" => "Bahasa Indonesia",
-            "swa" => "Kiswahili",
-            "mar" => "मराठी",
-            "tel" => "తెలుగు",
-            "tam" => "தமிழ்",
-            "vie" => "Tiếng Việt",
-            "jpn" => "日本語",
-            "kor" => "한국어",
-            "chi_sim" => "中文 (简体)",
-            "chi_tra" => "中文 (繁體)",
-            _ => return tag.to_string(),
-        }
-        .to_string()
+    fn message(e: &NSError) -> String {
+        e.localizedDescription().to_string()
     }
 
-    /// Maps a BCP-47 / POSIX locale prefix (e.g. `"fr-FR"`, `"en_US.UTF-8"`)
-    /// to the corresponding Tesseract 3-letter traineddata code.
-    fn bcp47_to_tesseract(code: &str) -> Option<&'static str> {
-        let trimmed = code.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("zh-tw")
-            || lower.starts_with("zh_tw")
-            || lower.starts_with("zh-hk")
-            || lower.starts_with("zh-hant")
-        {
-            return Some("chi_tra");
-        }
-        let prefix = lower
-            .split(['.', '_', '-'])
-            .next()
-            .unwrap_or("");
-        match prefix {
-            "en" => Some("eng"),
-            "fr" => Some("fra"),
-            "de" => Some("deu"),
-            "es" => Some("spa"),
-            "it" => Some("ita"),
-            "pt" => Some("por"),
-            "ru" => Some("rus"),
-            "uk" => Some("ukr"),
-            "nl" => Some("nld"),
-            "pl" => Some("pol"),
-            "tr" => Some("tur"),
-            "ar" => Some("ara"),
-            "hi" => Some("hin"),
-            "bn" => Some("ben"),
-            "ur" => Some("urd"),
-            "id" => Some("ind"),
-            "sw" => Some("swa"),
-            "mr" => Some("mar"),
-            "te" => Some("tel"),
-            "ta" => Some("tam"),
-            "vi" => Some("vie"),
-            "ja" => Some("jpn"),
-            "ko" => Some("kor"),
-            "zh" => Some("chi_sim"),
-            _ => None,
-        }
+    fn accurate_request() -> Retained<VNRecognizeTextRequest> {
+        let request = VNRecognizeTextRequest::new();
+        request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
+        request.setUsesLanguageCorrection(true);
+        request
     }
 
-    /// Parses the language codes returned by `tesseract --list-langs`.
-    pub(super) fn parse_lang_list(output: &str) -> Vec<OcrLanguage> {
-        output
-            .lines()
-            .map(str::trim)
-            .filter(|line| {
-                !line.is_empty()
-                    && !line.contains("List of available languages")
-                    && *line != "osd"
-                    && *line != "equ"
-                    && line.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            })
-            .map(|tag| OcrLanguage {
-                tag: tag.to_string(),
-                name: display_name(tag),
-            })
-            .collect()
+    /// Language tags Vision reads (en-US, fr-FR, …).
+    fn supported() -> Result<Vec<String>, String> {
+        // SAFETY: a plain query on a fresh request.
+        let tags =
+            unsafe { accurate_request().supportedRecognitionLanguagesAndReturnError() }.map_err(|e| message(&e))?;
+        Ok(tags.iter().map(|t| t.to_string()).collect())
     }
 
     pub fn languages() -> Result<Vec<OcrLanguage>, String> {
-        let Ok(out) = Command::new("tesseract").arg("--list-langs").output() else {
-            return Ok(Vec::new());
-        };
-        if !out.status.success() {
-            return Ok(Vec::new());
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let mut langs = parse_lang_list(&stdout);
-        if langs.is_empty() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            langs = parse_lang_list(&stderr);
-        }
-        Ok(langs)
+        let locale = NSLocale::currentLocale();
+        Ok(supported()?
+            .into_iter()
+            .map(|tag| {
+                let name = locale.localizedStringForLocaleIdentifier(&NSString::from_str(&tag)).to_string();
+                OcrLanguage { tag, name }
+            })
+            .collect())
     }
 
-    /// Chooses the installed Tesseract language matching `requested` (if any)
-    /// or falls back to system locale / `"eng"` / `"fra"` / first installed.
-    fn resolve_language(avail: &[OcrLanguage], requested: Option<&str>) -> Result<String, String> {
-        if avail.is_empty() {
-            return Err("no-ocr-language".into());
-        }
-        let find_avail = |tag: &str| avail.iter().find(|l| l.tag == tag).map(|l| l.tag.clone());
-
-        if let Some(req) = requested.map(str::trim).filter(|t| !t.is_empty()) {
-            if let Some(exact) = find_avail(req) {
-                return Ok(exact);
-            }
-            if let Some(mapped) = bcp47_to_tesseract(req).and_then(find_avail) {
-                return Ok(mapped);
-            }
-            return Err("no-ocr-language".into());
-        }
-
-        for var in ["LC_ALL", "LANG"] {
-            if let Ok(val) = std::env::var(var) {
-                let raw = val.split('.').next().unwrap_or("");
-                if let Some(found) = find_avail(raw)
-                    .or_else(|| bcp47_to_tesseract(raw).and_then(find_avail))
-                {
-                    return Ok(found);
+    /// The languages to read with: `language`, or else the user's own
+    /// languages (System Settings ▸ Language & Region) that Vision reads, in
+    /// their order, with English last.
+    fn languages_for(language: Option<&str>) -> Vec<String> {
+        let supported = supported().unwrap_or_default();
+        let base = |t: &str| t.split(['-', '_']).next().unwrap_or("").to_ascii_lowercase();
+        let wanted: Vec<String> = match language.filter(|t| !t.is_empty()) {
+            Some(tag) => vec![tag.to_string()],
+            None => NSLocale::preferredLanguages().iter().map(|t| t.to_string()).collect(),
+        };
+        let mut out: Vec<String> = Vec::new();
+        for w in wanted.iter().map(String::as_str).chain(["en-US"]) {
+            let hit = supported
+                .iter()
+                .find(|s| s.eq_ignore_ascii_case(w))
+                .or_else(|| supported.iter().find(|s| base(s) == base(w)));
+            if let Some(hit) = hit {
+                if !out.contains(hit) {
+                    out.push(hit.clone());
                 }
             }
         }
-        Ok(find_avail("eng")
-            .or_else(|| find_avail("fra"))
-            .unwrap_or_else(|| avail[0].tag.clone()))
+        out
     }
 
-    /// Parses Tesseract's TSV output into lines and normalized word bounding boxes.
-    pub(super) fn parse_tsv(tsv: &str, img_w: u32, img_h: u32) -> Vec<OcrLine> {
-        let fw = img_w.max(1) as f32;
-        let fh = img_h.max(1) as f32;
-        let mut lines: Vec<OcrLine> = Vec::new();
-        let mut current_key: Option<(u32, u32, u32, u32)> = None;
-        let mut current_words: Vec<OcrWord> = Vec::new();
-
-        let flush = |words: &mut Vec<OcrWord>, out: &mut Vec<OcrLine>| {
-            if words.is_empty() {
-                return;
-            }
-            let text = words
-                .iter()
-                .map(|w| w.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            out.push(OcrLine {
-                text,
-                words: std::mem::take(words),
-            });
-        };
-
-        for raw in tsv.lines() {
-            let line = raw.trim_end_matches('\r');
-            let mut cols = line.splitn(12, '\t');
-            let (
-                Some(level),
-                Some(page),
-                Some(block),
-                Some(par),
-                Some(line_no),
-                Some(_word_no),
-                Some(left),
-                Some(top),
-                Some(width),
-                Some(height),
-                Some(conf),
-                Some(text),
-            ) = (
-                cols.next(),
-                cols.next(),
-                cols.next(),
-                cols.next(),
-                cols.next(),
-                cols.next(),
-                cols.next(),
-                cols.next(),
-                cols.next(),
-                cols.next(),
-                cols.next(),
-                cols.next(),
-            )
-            else {
-                continue;
-            };
-            if level.trim() != "5" {
-                continue;
-            }
-            if conf.trim().parse::<f32>().unwrap_or(-1.0) < 0.0 {
-                continue;
-            }
-            let word_text = text.trim();
-            if word_text.is_empty() {
-                continue;
-            }
-            let (Ok(pg), Ok(bl), Ok(pr), Ok(ln)) = (
-                page.trim().parse::<u32>(),
-                block.trim().parse::<u32>(),
-                par.trim().parse::<u32>(),
-                line_no.trim().parse::<u32>(),
-            ) else {
-                continue;
-            };
-            let (Ok(l), Ok(t), Ok(w), Ok(h)) = (
-                left.trim().parse::<f32>(),
-                top.trim().parse::<f32>(),
-                width.trim().parse::<f32>(),
-                height.trim().parse::<f32>(),
-            ) else {
-                continue;
-            };
-            let key = (pg, bl, pr, ln);
-            if current_key != Some(key) {
-                flush(&mut current_words, &mut lines);
-                current_key = Some(key);
-            }
-            current_words.push(OcrWord {
-                text: word_text.to_string(),
-                x: (l / fw).clamp(0.0, 1.0),
-                y: (t / fh).clamp(0.0, 1.0),
-                w: (w / fw).clamp(0.0, 1.0),
-                h: (h / fh).clamp(0.0, 1.0),
-            });
-        }
-        flush(&mut current_words, &mut lines);
-        lines
+    /// The box of `range` (UTF-16 units of the line) in fractions of the
+    /// picture, from the top left. Vision measures from the bottom left.
+    fn word_box(text: &VNRecognizedText, range: NSRange) -> Option<(f32, f32, f32, f32)> {
+        // SAFETY: `boundingBoxForRange:error:` takes an NSRange and returns
+        // the observation (or nil and an error).
+        let obs: Result<Retained<VNRectangleObservation>, Retained<NSError>> =
+            unsafe { objc2::msg_send![text, boundingBoxForRange: range, error: _] };
+        let r = unsafe { obs.ok()?.boundingBox() };
+        let (x, y, w, h) = (r.origin.x as f32, r.origin.y as f32, r.size.width as f32, r.size.height as f32);
+        Some((x, 1.0 - y - h, w, h))
     }
 
     pub fn recognize(bytes: &[u8], language: Option<&str>) -> Result<OcrResult, String> {
-        let avail = languages()?;
-        let lang_tag = resolve_language(&avail, language)?;
-        let (png_bytes, w, h) = prepare_png(bytes, 4000)?;
+        // Same picture as the other engines read: small text enlarged,
+        // transparency on white.
+        let rgba = prepare_rgba(bytes, 4000)?;
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(rgba)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
 
-        let mut child = Command::new("tesseract")
-            .args(["stdin", "stdout", "-l", &lang_tag, "--psm", "3", "tsv"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|_| "no-ocr-language".to_string())?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            // Ignore BrokenPipe in case Tesseract already exited; wait_with_output reports status.
-            let _ = stdin.write_all(&png_bytes);
+        let request = accurate_request();
+        let langs = languages_for(language);
+        if !langs.is_empty() {
+            let tags: Vec<Retained<NSString>> = langs.iter().map(|t| NSString::from_str(t)).collect();
+            request.setRecognitionLanguages(&NSArray::from_retained_slice(&tags));
         }
+        let handler = VNImageRequestHandler::initWithData_options(
+            VNImageRequestHandler::alloc(),
+            &NSData::with_bytes(&png),
+            &NSDictionary::new(),
+        );
+        let as_request: &VNRequest = &request;
+        handler.performRequests_error(&NSArray::from_slice(&[as_request])).map_err(|e| message(&e))?;
 
-        let out = child.wait_with_output().map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(if err.is_empty() {
-                "tesseract failed".into()
-            } else {
-                err
-            });
+        let mut lines = Vec::new();
+        for obs in request.results().iter().flat_map(|r| r.iter()) {
+            let Some(top) = obs.topCandidates(1).firstObject() else { continue };
+            let line = top.string().to_string();
+            let mut words = Vec::new();
+            // Word by word, each with its own box; offsets in UTF-16 units.
+            let mut offset = 0usize;
+            for (is_space, chunk) in chunks(&line) {
+                let len = chunk.encode_utf16().count();
+                if !is_space {
+                    if let Some((x, y, w, h)) = word_box(&top, NSRange::new(offset, len)) {
+                        words.push(OcrWord { text: chunk.to_string(), x, y, w, h });
+                    }
+                }
+                offset += len;
+            }
+            lines.push(OcrLine { text: line, words });
         }
+        let language = langs.first().cloned().unwrap_or_else(|| "en-US".into());
+        Ok(OcrResult { text: join_lines(&lines), lines, language })
+    }
 
-        let tsv = String::from_utf8_lossy(&out.stdout);
-        let lines = parse_tsv(&tsv, w, h);
-        Ok(OcrResult {
-            text: join_lines(&lines),
-            lines,
-            language: lang_tag,
-        })
+    /// `line` cut into runs of spaces and runs of anything else.
+    fn chunks(line: &str) -> Vec<(bool, &str)> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        let mut space = None;
+        for (i, c) in line.char_indices() {
+            let s = c.is_whitespace();
+            if space.is_some_and(|prev| prev != s) {
+                out.push((space.unwrap(), &line[start..i]));
+                start = i;
+            }
+            space = Some(s);
+        }
+        if let Some(s) = space {
+            out.push((s, &line[start..]));
+        }
+        out
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn lines_are_cut_into_words_and_spaces() {
+        assert_eq!(
+            chunks("Bonjour  le monde"),
+            vec![(false, "Bonjour"), (true, "  "), (false, "le"), (true, " "), (false, "monde")]
+        );
+        assert_eq!(chunks(""), vec![]);
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+mod engine {
+    use super::*;
+
+    /// One model reads every language written in the Latin alphabet
+    /// (English, French, German, Spanish, …): there is nothing to choose.
+    pub fn languages() -> Result<Vec<OcrLanguage>, String> {
+        Ok(Vec::new())
+    }
+
+    pub fn recognize(bytes: &[u8], _language: Option<&str>) -> Result<OcrResult, String> {
+        let rgba = prepare_rgba(bytes, 4000)?;
+        let rgb = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+        let lines = crate::rapid_ocr::read(&rgb)?;
+        Ok(OcrResult { text: join_lines(&lines), lines, language: "latin".into() })
     }
 }
 
@@ -511,41 +376,6 @@ mod tests {
     fn joins_lines() {
         let l = |t: &str| OcrLine { text: t.into(), words: vec![] };
         assert_eq!(join_lines(&[l("a b"), l("c")]), "a b\nc");
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn parses_tesseract_lang_list_and_tsv() {
-        let langs = engine::parse_lang_list(
-            "List of available languages in \"/usr/share/tesseract-ocr/5/tessdata/\" (4):\neng\nfra\nosd\nequ\n",
-        );
-        assert_eq!(langs.len(), 2);
-        assert_eq!(langs[0].tag, "eng");
-        assert_eq!(langs[0].name, "English");
-        assert_eq!(langs[1].tag, "fra");
-        assert_eq!(langs[1].name, "Français");
-
-        let tsv = concat!(
-            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n",
-            "4\t1\t1\t1\t1\t0\t10\t20\t200\t40\t-1\t\n",
-            "5\t1\t1\t1\t1\t1\t10\t20\t80\t40\t95\tHello\n",
-            "5\t1\t1\t1\t1\t2\t100\t20\t110\t40\t96\tEzReader\n",
-            "5\t1\t1\t1\t2\t1\t10\t80\t60\t30\t90\tWorld\n",
-        );
-        let lines = engine::parse_tsv(tsv, 400, 200);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].text, "Hello EzReader");
-        assert_eq!(lines[0].words.len(), 2);
-        assert!((lines[0].words[0].x - 0.025).abs() < 1e-5);
-        assert!((lines[0].words[0].y - 0.1).abs() < 1e-5);
-        assert_eq!(lines[1].text, "World");
-    }
-
-    #[test]
-    fn prepare_png_encodes_scaled_png() {
-        let (out, w, h) = prepare_png(&png(100, 50, [10, 20, 30, 255]), 10000).unwrap();
-        assert_eq!((w, h), (200, 100));
-        assert_eq!(image::guess_format(&out).unwrap(), image::ImageFormat::Png);
     }
 
     /// Reads a real picture of text when an OCR language is installed

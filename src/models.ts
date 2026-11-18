@@ -118,9 +118,48 @@ export const FONT_FAMILIES: { value: FontFamilyValue; label: string; css: string
   { value: "courier",   label: "Courier",   css: `"Courier New", Courier, monospace` },
 ];
 
+/**
+ * The 30 most common fonts of Windows and macOS, offered when installed
+ * (embedded in the saved PDF), each with the standard font that stands in
+ * for it where it is not installed.
+ */
+export const SYSTEM_FONTS: { name: string; fallback: FontFamilyValue }[] = [
+  { name: "Arial", fallback: "helvetica" },
+  { name: "Arial Black", fallback: "helvetica" },
+  { name: "Verdana", fallback: "helvetica" },
+  { name: "Tahoma", fallback: "helvetica" },
+  { name: "Trebuchet MS", fallback: "helvetica" },
+  { name: "Georgia", fallback: "times" },
+  { name: "Times New Roman", fallback: "times" },
+  { name: "Courier New", fallback: "courier" },
+  { name: "Comic Sans MS", fallback: "helvetica" },
+  { name: "Impact", fallback: "helvetica" },
+  { name: "Palatino Linotype", fallback: "times" },
+  { name: "Book Antiqua", fallback: "times" },
+  { name: "Garamond", fallback: "times" },
+  { name: "Century Gothic", fallback: "helvetica" },
+  { name: "Franklin Gothic Medium", fallback: "helvetica" },
+  { name: "Lucida Console", fallback: "courier" },
+  { name: "Segoe UI", fallback: "helvetica" },
+  { name: "Calibri", fallback: "helvetica" },
+  { name: "Cambria", fallback: "times" },
+  { name: "Candara", fallback: "helvetica" },
+  { name: "Consolas", fallback: "courier" },
+  { name: "Constantia", fallback: "times" },
+  { name: "Corbel", fallback: "helvetica" },
+  { name: "Helvetica Neue", fallback: "helvetica" },
+  { name: "Avenir Next", fallback: "helvetica" },
+  { name: "Futura", fallback: "helvetica" },
+  { name: "Gill Sans", fallback: "helvetica" },
+  { name: "Optima", fallback: "helvetica" },
+  { name: "Baskerville", fallback: "times" },
+  { name: "Menlo", fallback: "courier" },
+];
+
 /** CSS font-family list that looks like the PDF font the text will be saved with. */
-export function fontCss(family: FontFamilyValue | undefined): string {
-  return (FONT_FAMILIES.find(f => f.value === family) ?? FONT_FAMILIES[0]).css;
+export function fontCss(family: FontFamilyValue | undefined, name?: string | null): string {
+  const base = (FONT_FAMILIES.find(f => f.value === family) ?? FONT_FAMILIES[0]).css;
+  return name ? `"${name.replace(/["\\]/g, "")}", ${base}` : base;
 }
 
 export interface TextAnnotation extends BaseAnnotation {
@@ -136,6 +175,8 @@ export interface TextAnnotation extends BaseAnnotation {
   alignment: TextAlignmentValue;
   /** Absent in files saved before font choice existed (Helvetica). */
   fontFamily?: FontFamilyValue;
+  /** A font of the computer (see SYSTEM_FONTS), embedded on save; `fontFamily` stands in without it. */
+  fontName?: string;
   /** Box colour behind the text; null or absent means none. */
   backgroundColor?: RgbColor | null;
   /** Edited text: the original words' area, painted with the page colour first. */
@@ -163,6 +204,8 @@ export interface SignatureAnnotation extends BaseAnnotation {
   imageData: string;
   /** The pen strokes of a drawn signature; drawn instead of `imageData`. */
   vector?: InkVector;
+  /** Ink of the pen strokes; the default dark ink when absent. */
+  color?: RgbColor;
 }
 
 /** A picture placed on the page; same fields as a signature. */
@@ -252,6 +295,8 @@ export interface ActiveToolState {
   underline: boolean;
   alignment: TextAlignmentValue;
   fontFamily: FontFamilyValue;
+  /** A font of the computer for new text, or null for the standard `fontFamily`. */
+  fontName: string | null;
   /** Outline colour of rectangles and ellipses (text uses `color`). */
   shapeColor: RgbColor;
   /** Interior colour of new shapes, or null for hollow. */
@@ -268,7 +313,18 @@ export interface ActiveToolState {
   redactShape: RedactShape;
   stampMark: StampMark;
   stampColor: RgbColor;
+  /** Ink of drawn signatures being placed. */
+  signatureColor: RgbColor;
 }
+
+/** Softer pastel highlighter palette (shared by the toolbar and the floating highlight popover). */
+export const HIGHLIGHT_PRESETS: [string, string][] = [
+  ["#fef08a", "Yellow"],
+  ["#bbf7d0", "Green"],
+  ["#fbcfe8", "Pink"],
+  ["#bfdbfe", "Blue"],
+  ["#fed7aa", "Orange"],
+];
 
 export function defaultToolState(): ActiveToolState {
   return {
@@ -280,18 +336,20 @@ export function defaultToolState(): ActiveToolState {
     underline: false,
     alignment: "left",
     fontFamily: "helvetica",
+    fontName: null,
     // Red reads on white pages and on the dark toolbar alike.
     shapeColor: { r: 229, g: 57, b: 53 },
     fillColor: null,
     strokeWidth: 2,
     opacity: 1,
     textBackground: null,
-    highlightColor: { r: 250, g: 204, b: 21 },
-    highlightOpacity: 0.45,
+    highlightColor: { r: 254, g: 240, b: 138 },
+    highlightOpacity: 0.55,
     noteColor: { r: 253, g: 224, b: 71 },
     redactShape: "rect",
     stampMark: "check",
     stampColor: { r: 0, g: 0, b: 0 },
+    signatureColor: { r: 24, g: 24, b: 27 },
   };
 }
 

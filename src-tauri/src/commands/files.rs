@@ -16,15 +16,28 @@ pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> CmdResult<()> {
     if from == to {
         return Ok(());
     }
-    // A case-only change ("a.pdf" -> "A.pdf") is the same file on Windows.
-    let same_file = cfg!(windows)
-        && from
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&to.to_string_lossy());
+    // A case-only change ("a.pdf" -> "A.pdf") is the same file on Windows,
+    // and on macOS (its disks ignore case by default).
+    let same_file = is_same_file(from, to);
     if to.exists() && !same_file {
         return Err(PdfError::new(ErrorCode::Exists, "exists"));
     }
     std::fs::rename(from, to).map_err(|e| e.to_string()).map_err(PdfError::from)
+}
+
+#[cfg(windows)]
+fn is_same_file(from: &Path, to: &Path) -> bool {
+    from.to_string_lossy().eq_ignore_ascii_case(&to.to_string_lossy())
+}
+
+/// Both names lead to the same file on disk (a case-insensitive disk).
+#[cfg(unix)]
+fn is_same_file(from: &Path, to: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(from), std::fs::metadata(to)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
 }
 
 /// Renames the open document on disk (the title bar rename, applied on save).
@@ -49,10 +62,7 @@ mod tests {
         let d = std::env::temp_dir().join(format!(
             "ezreader-rename-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -85,16 +95,22 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn refuses_case_collision_on_case_sensitive_fs() {
+    fn case_only_renames_follow_the_disk() {
         let d = dir();
         let lower = d.join("a.pdf");
         let upper = d.join("A.pdf");
         std::fs::write(&lower, b"lower").unwrap();
         std::fs::write(&upper, b"upper").unwrap();
-        assert_eq!(
-            rename_no_clobber(&lower, &upper),
-            Err(PdfError::new(ErrorCode::Exists, "exists"))
-        );
+        if std::fs::read(&lower).unwrap() == b"upper" {
+            // A disk that ignores case (macOS by default): both names are
+            // one file, and the rename only changes its case.
+            assert_eq!(rename_no_clobber(&lower, &upper), Ok(()));
+            let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+            assert_eq!(names, ["A.pdf"]);
+            let _ = std::fs::remove_dir_all(d);
+            return;
+        }
+        assert_eq!(rename_no_clobber(&lower, &upper), Err(PdfError::new(ErrorCode::Exists, "exists")));
         assert_eq!(std::fs::read(&upper).unwrap(), b"upper");
         assert!(lower.exists());
         let _ = std::fs::remove_dir_all(d);
@@ -156,11 +172,7 @@ const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 /// The bytes of a picture file, checked by extension and size.
 pub fn read_image_bytes(path: &str) -> CmdResult<Vec<u8>> {
     let p = std::path::Path::new(path);
-    let ext = p
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
+    let ext = p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
     if !crate::commands::dialog::IMAGE_EXTENSIONS.contains(&ext.as_str()) {
         return Err(PdfError::new(ErrorCode::NotAnImage, "not an image"));
     }
@@ -188,22 +200,26 @@ const MAX_PICTURE_SIDE: u32 = 4096;
 /// JPEG, as PNG otherwise (the PDF writer takes both).
 #[tauri::command(async)]
 pub fn load_picture(path: String) -> CmdResult<Picture> {
-    use base64::Engine;
     crate::grants::check(&path)?;
-    let bytes = read_image_bytes(&path)?;
+    picture_from_bytes(&read_image_bytes(&path)?)
+}
+
+/// [`load_picture`] on bytes already read (and the fuzzing entry point).
+pub(crate) fn picture_from_bytes(bytes: &[u8]) -> CmdResult<Picture> {
+    use base64::Engine;
     let not_an_image = |e: image::ImageError| PdfError::new(ErrorCode::NotAnImage, e.to_string());
-    let format = image::guess_format(&bytes).map_err(not_an_image)?;
+    let format = image::guess_format(bytes).map_err(not_an_image)?;
     let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
     let keep = matches!(format, image::ImageFormat::Png | image::ImageFormat::Jpeg);
     if keep {
-        let (width, height) = image::ImageReader::with_format(std::io::Cursor::new(&bytes), format)
+        let (width, height) = image::ImageReader::with_format(std::io::Cursor::new(bytes), format)
             .into_dimensions()
             .map_err(not_an_image)?;
         if width.max(height) <= MAX_PICTURE_SIDE {
-            return Ok(Picture { data: b64(&bytes), width, height });
+            return Ok(Picture { data: b64(bytes), width, height });
         }
     }
-    let mut img = image::load_from_memory_with_format(&bytes, format).map_err(not_an_image)?;
+    let mut img = image::load_from_memory_with_format(bytes, format).map_err(not_an_image)?;
     if img.width().max(img.height()) > MAX_PICTURE_SIDE {
         img = img.resize(MAX_PICTURE_SIDE, MAX_PICTURE_SIDE, image::imageops::FilterType::Triangle);
     }
@@ -230,10 +246,7 @@ pub fn temp_tag() -> String {
 /// Only paths the export may write are looked at.
 #[tauri::command]
 pub fn existing_files(paths: Vec<String>) -> Vec<String> {
-    paths
-        .into_iter()
-        .filter(|p| crate::grants::check(p).is_ok() && std::path::Path::new(p).exists())
-        .collect()
+    paths.into_iter().filter(|p| crate::grants::check(p).is_ok() && std::path::Path::new(p).exists()).collect()
 }
 
 /// Writes base64 `data` (a page picture of an export) to `path`, atomically.
@@ -251,8 +264,8 @@ pub fn write_image_file(path: String, data: String) -> CmdResult<()> {
     }
     crate::grants::check(&path)?;
     let b64 = data.split_once(',').map_or(data.as_str(), |(_, d)| d);
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|e| format!("invalid image data: {e}"))?;
-    crate::fsutil::write_atomic(&path, |tmp| std::fs::write(tmp, &bytes).map_err(|e| e.to_string())).map_err(PdfError::from)
+    let bytes =
+        base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| format!("invalid image data: {e}"))?;
+    crate::fsutil::write_atomic(&path, |tmp| std::fs::write(tmp, &bytes).map_err(|e| e.to_string()))
+        .map_err(PdfError::from)
 }

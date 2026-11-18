@@ -1,4 +1,5 @@
-﻿// ── Types ─────────────────────────────────────────────────────────────────────
+﻿import { isMac, macShortcuts } from "./platform";
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface Translations {
   // Toolbar button labels
@@ -151,6 +152,16 @@ export interface Translations {
   welcomeTagline?: string;
   welcomeOpen?: string;
   welcomeDropHint?: string;
+  welcomeDefaultReader?: string;
+  welcomeDefaultReaderHint?: string;
+  updateUpToDateHint?: string;
+  updateAvailable?: string;
+  updateAvailableHint?: string;
+  updateStoreHint?: string;
+  updateInstalling?: string;
+  updateOpened?: string;
+  updateOtherWindows?: string;
+  updateFailed?: string;
   welcomeFeatHeading?: string;
   welcomeFeatAnnotate?: string;
   welcomeFeatSign?: string;
@@ -204,6 +215,7 @@ export interface Translations {
   ttRealSize?: string;
   ttPages1?: string;
   ttPages2?: string;
+  ttPages2Even?: string;
   ttPages3?: string;
   ttScrollVertical?: string;
   ttScrollHorizontal?: string;
@@ -258,6 +270,8 @@ export interface Translations {
   sbExportHint?: string;
   sbDelete?: string;
   sbDeleteHint?: string;
+  sbOutlineHint?: string;
+  sbOutlineEmpty?: string;
   sbSelectedOne?: string;
   sbSelectedMany?: string;
   msgPagesDeleted?: string;
@@ -270,6 +284,8 @@ export interface Translations {
   sbMovingOne?: string;
   sbMovingMany?: string;
   sbDragOut?: string;
+  tabClose?: string;
+  tabDragMerge?: string;
   nwPageOne?: string;
   nwPageMany?: string;
   msgNewWindowFailed?: string;
@@ -307,6 +323,23 @@ export interface Translations {
   menuExtractPages?: string;
   menuSelectAllPages?: string;
   menuPages3?: string;
+  // Menu bar (reorganized)
+  menuTools?: string;
+  /** The macOS Window menu. */
+  menuWindow?: string;
+  menuOpen?: string;
+  menuSaveAs?: string;
+  menuExport?: string;
+  menuPrintDialog?: string;
+  menuSettingsDialog?: string;
+  menuFind?: string;
+  menuInsertImage?: string;
+  menuInsertImagePage?: string;
+  menuRotate90?: string;
+  menuActualSize?: string;
+  menuFullscreen?: string;
+  menuProtect?: string;
+  kbdShift?: string;
   menuScrollHorizontal?: string;
   msgRenamed?: string;
   msgRenameFailed?: string;
@@ -333,6 +366,43 @@ export interface Translations {
   optColor?: string;
   optCustomColor?: string;
   optThickness?: string;
+  optFontsStandard?: string;
+  optFontsInstalled?: string;
+  annText?: string;
+  annEditedText?: string;
+  annNote?: string;
+  annArrow?: string;
+  annLine?: string;
+  annInk?: string;
+  annRect?: string;
+  annCircle?: string;
+  annHighlight?: string;
+  annSignature?: string;
+  annImage?: string;
+  annCross?: string;
+  annCheck?: string;
+  annRedact?: string;
+  ttStudioHide?: string;
+  ttStudioShow?: string;
+  studioPanel?: string;
+  studioEmpty?: string;
+  studioAnnotations?: string;
+  studioNoAnnotations?: string;
+  studioTitle?: string;
+  studioPageAbbr?: string;
+  ttDeleteAnnotation?: string;
+  optBrush?: string;
+  optInk?: string;
+  brushBallpoint?: string;
+  brushFineliner?: string;
+  brushFountain?: string;
+  brushBrush?: string;
+  brushCalligraphy?: string;
+  brushMarker?: string;
+  brushPencil?: string;
+  brushCharcoal?: string;
+  brushAirbrush?: string;
+  brushWatercolor?: string;
   optOpacity?: string;
   colBlack?: string;
   colRed?: string;
@@ -657,11 +727,11 @@ const EN: Translations = {
   menuAnnotate:      "Annotate",
   menuUndo:          "Undo",
   menuRedo:          "Redo",
-  menuZoomIn:        "Zoom In",
-  menuZoomOut:       "Zoom Out",
+  menuZoomIn:        "Zoom in",
+  menuZoomOut:       "Zoom out",
   menuResetZoom:     "Reset Zoom",
-  menuFitWidth:      "Fit to Width",
-  menuFitHeight:     "Fit to Height",
+  menuFitWidth:      "Fit to width",
+  menuFitHeight:     "Fit to height",
   menuRotate:        "Rotate",
   menuManagePages:   "Manage Pages",
   menuAnnotateMode:  "Annotation Mode",
@@ -674,6 +744,16 @@ const EN: Translations = {
   welcomeTagline:           "Read, annotate, sign and edit your Files",
   welcomeOpen:              "Open a PDF",
   welcomeDropHint:          "Drop a file to begin",
+  welcomeDefaultReader:     "Default PDF reader",
+  welcomeDefaultReaderHint: "Open PDF files with EzReader",
+  updateUpToDateHint:  "Up to date: {v} is the latest version",
+  updateAvailable:     "Update to {v}",
+  updateAvailableHint: "Version {v} is out (you have {cur}). Click to install it.",
+  updateStoreHint:     "Version {v} is out (you have {cur}). Click to open the Microsoft Store.",
+  updateInstalling:    "Updating\u2026",
+  updateOpened:        "Finish the update in the window that just opened",
+  updateOtherWindows:  "Close your other EzReader windows first, then update",
+  updateFailed:        "Couldn't update: {err}",
   welcomeFeatHeading:       "What you can do with EzReader",
   welcomeFeatAnnotate:      "Annotate Files",
   welcomeFeatSign:          "Sign Documents",
@@ -724,7 +804,8 @@ const EN: Translations = {
   ttResetZoom:          "Reset zoom to default (Ctrl+0)",
   ttRealSize:           "Actual size (1:1)",
   ttPages1:             "One page per row",
-  ttPages2:             "Two pages per row",
+  ttPages2:             "Two pages (odd on left)",
+  ttPages2Even:         "Two pages (even on left)",
   ttPages3:             "Three pages per row",
   ttScrollVertical:     "Scroll vertically",
   ttScrollHorizontal:   "Scroll horizontally",
@@ -778,6 +859,8 @@ const EN: Translations = {
   sbExportHint: "Save the selected pages as a new PDF",
   sbDelete: "Delete",
   sbDeleteHint: "Delete the selected pages",
+  sbOutlineHint: "Document structure",
+  sbOutlineEmpty: "No document structure",
   sbSelectedOne: "1 page selected",
   sbSelectedMany: "{n} pages selected",
   msgPagesDeleted: "{n} page(s) deleted",
@@ -790,6 +873,8 @@ const EN: Translations = {
   sbMovingOne: "Page {p}",
   sbMovingMany: "{n} pages",
   sbDragOut: "Release to open in a new window",
+  tabClose: "Close tab (Ctrl+W)",
+  tabDragMerge: "Release to move it to that window",
   nwPageOne: "{name} (page {pages})",
   nwPageMany: "{name} (pages {pages})",
   msgNewWindowFailed: "Couldn't open a new window: {err}",
@@ -826,7 +911,22 @@ const EN: Translations = {
   menuExtractPages: "Extract selected pages…",
   menuSelectAllPages: "Select all pages",
   menuPages3: "Three pages per row",
-  menuScrollHorizontal: "Horizontal scrolling",
+  menuTools: "Tools",
+  menuWindow: "Window",
+  menuOpen: "Open…",
+  menuSaveAs: "Save as…",
+  menuExport: "Export…",
+  menuPrintDialog: "Print…",
+  menuSettingsDialog: "Settings…",
+  menuFind: "Find…",
+  menuInsertImage: "Insert picture…",
+  menuInsertImagePage: "Insert picture as a page…",
+  menuRotate90: "Rotate 90°",
+  menuActualSize: "Actual size",
+  menuFullscreen: "Full screen",
+  menuProtect: "Protect with a password…",
+  kbdShift: "Shift",
+  menuScrollHorizontal: "Scroll horizontally",
   msgRenamed: "Renamed to {name}",
   msgRenameFailed: "Rename failed: {err}",
   msgRenameExists: "A file with that name already exists.",
@@ -851,6 +951,43 @@ const EN: Translations = {
   optColor: "Color",
   optCustomColor: "Custom color",
   optThickness: "Thickness",
+  optFontsStandard: "Standard",
+  optFontsInstalled: "On this computer",
+  annText: "Text",
+  annEditedText: "Edited text",
+  annNote: "Sticky note",
+  annArrow: "Arrow",
+  annLine: "Line",
+  annInk: "Freehand",
+  annRect: "Rectangle",
+  annCircle: "Ellipse",
+  annHighlight: "Highlight",
+  annSignature: "Signature",
+  annImage: "Picture",
+  annCross: "Cross",
+  annCheck: "Check mark",
+  annRedact: "Redaction",
+  ttStudioHide: "Hide the panel",
+  ttStudioShow: "Show the panel",
+  studioPanel: "Tool options and annotations",
+  studioEmpty: "Pick a tool, or click an annotation to change it.",
+  studioAnnotations: "Annotations",
+  studioNoAnnotations: "No annotations yet.",
+  studioTitle: "Options",
+  studioPageAbbr: "p. {n}",
+  ttDeleteAnnotation: "Delete this annotation",
+  optBrush: "Brush",
+  optInk: "Ink",
+  brushBallpoint: "Ballpoint pen",
+  brushFineliner: "Fineliner",
+  brushFountain: "Fountain pen",
+  brushBrush: "Brush",
+  brushCalligraphy: "Calligraphy",
+  brushMarker: "Marker",
+  brushPencil: "Pencil",
+  brushCharcoal: "Charcoal",
+  brushAirbrush: "Airbrush",
+  brushWatercolor: "Watercolor",
   optOpacity: "Opacity",
   colBlack: "Black",
   colRed: "Red",
@@ -1189,6 +1326,16 @@ const FR: Translations = {
   welcomeTagline:           "Lisez, annotez, signez et modifiez vos fichiers",
   welcomeOpen:              "Ouvrir un PDF",
   welcomeDropHint:          "D\u00e9posez un fichier pour commencer",
+  welcomeDefaultReader:     "Lecteur PDF par d\u00e9faut",
+  welcomeDefaultReaderHint: "Ouvrir les fichiers PDF avec EzReader",
+  updateUpToDateHint:  "\u00c0 jour : {v} est la derni\u00e8re version",
+  updateAvailable:     "Mettre \u00e0 jour vers {v}",
+  updateAvailableHint: "La version {v} est sortie (vous avez {cur}). Cliquez pour l'installer.",
+  updateStoreHint:     "La version {v} est sortie (vous avez {cur}). Cliquez pour ouvrir le Microsoft Store.",
+  updateInstalling:    "Mise \u00e0 jour\u2026",
+  updateOpened:        "Terminez la mise \u00e0 jour dans la fen\u00eatre qui vient de s'ouvrir",
+  updateOtherWindows:  "Fermez d'abord vos autres fen\u00eatres EzReader, puis mettez \u00e0 jour",
+  updateFailed:        "Impossible de mettre \u00e0 jour : {err}",
   welcomeFeatHeading:       "Ce que vous pouvez faire avec EzReader",
   welcomeFeatAnnotate:      "Annoter des fichiers",
   welcomeFeatSign:          "Signer des documents",
@@ -1239,7 +1386,8 @@ const FR: Translations = {
   ttResetZoom:          "Revenir au zoom par défaut (Ctrl+0)",
   ttRealSize:           "Taille réelle (1:1)",
   ttPages1:             "1 page par ligne",
-  ttPages2:             "2 pages par ligne",
+  ttPages2:             "Doubles pages, impaires à gauche",
+  ttPages2Even:         "Doubles pages, paires à gauche",
   ttPages3:             "3 pages par ligne",
   ttScrollVertical:     "Défilement vertical",
   ttScrollHorizontal:   "Défilement horizontal",
@@ -1293,6 +1441,8 @@ const FR: Translations = {
   sbExportHint: "Enregistrer les pages sélectionnées dans un nouveau PDF",
   sbDelete: "Supprimer",
   sbDeleteHint: "Supprimer les pages sélectionnées",
+  sbOutlineHint: "Structure du document",
+  sbOutlineEmpty: "Aucune structure dans ce document",
   sbSelectedOne: "1 page sélectionnée",
   sbSelectedMany: "{n} pages sélectionnées",
   msgPagesDeleted: "{n} page(s) supprimée(s)",
@@ -1305,6 +1455,8 @@ const FR: Translations = {
   sbMovingOne: "Page {p}",
   sbMovingMany: "{n} pages",
   sbDragOut: "Relâchez pour ouvrir dans une nouvelle fenêtre",
+  tabClose: "Fermer l'onglet (Ctrl+W)",
+  tabDragMerge: "Relâchez pour le déplacer dans cette fenêtre",
   nwPageOne: "{name} (page {pages})",
   nwPageMany: "{name} (pages {pages})",
   msgNewWindowFailed: "Impossible d'ouvrir une nouvelle fenêtre : {err}",
@@ -1340,7 +1492,22 @@ const FR: Translations = {
   menuInsertPdf: "Insérer un PDF…",
   menuExtractPages: "Extraire les pages sélectionnées…",
   menuSelectAllPages: "Sélectionner toutes les pages",
-  menuPages3: "Trois pages par ligne",
+  menuPages3: "3 pages par ligne",
+  menuTools: "Outils",
+  menuWindow: "Fenêtre",
+  menuOpen: "Ouvrir…",
+  menuSaveAs: "Enregistrer sous…",
+  menuExport: "Exporter…",
+  menuPrintDialog: "Imprimer…",
+  menuSettingsDialog: "Paramètres…",
+  menuFind: "Rechercher…",
+  menuInsertImage: "Insérer une image…",
+  menuInsertImagePage: "Insérer une image comme page…",
+  menuRotate90: "Faire pivoter de 90°",
+  menuActualSize: "Taille réelle",
+  menuFullscreen: "Plein écran",
+  menuProtect: "Protéger par mot de passe…",
+  kbdShift: "Maj",
   menuScrollHorizontal: "Défilement horizontal",
   msgRenamed: "Renommé en {name}",
   msgRenameFailed: "Échec du renommage : {err}",
@@ -1366,6 +1533,43 @@ const FR: Translations = {
   optColor: "Couleur",
   optCustomColor: "Couleur personnalisée",
   optThickness: "Épaisseur",
+  optFontsStandard: "Standard",
+  optFontsInstalled: "Sur cet ordinateur",
+  annText: "Texte",
+  annEditedText: "Texte modifié",
+  annNote: "Post-it",
+  annArrow: "Flèche",
+  annLine: "Trait",
+  annInk: "Tracé libre",
+  annRect: "Rectangle",
+  annCircle: "Ellipse",
+  annHighlight: "Surlignage",
+  annSignature: "Signature",
+  annImage: "Image",
+  annCross: "Croix",
+  annCheck: "Coche",
+  annRedact: "Caviardage",
+  ttStudioHide: "Masquer le panneau",
+  ttStudioShow: "Afficher le panneau",
+  studioPanel: "Réglages de l'outil et annotations",
+  studioEmpty: "Choisissez un outil, ou cliquez sur une annotation pour la modifier.",
+  studioAnnotations: "Annotations",
+  studioNoAnnotations: "Aucune annotation pour l'instant.",
+  studioTitle: "Réglages",
+  studioPageAbbr: "p. {n}",
+  ttDeleteAnnotation: "Supprimer cette annotation",
+  optBrush: "Pinceau",
+  optInk: "Encre",
+  brushBallpoint: "Stylo bille",
+  brushFineliner: "Feutre fin",
+  brushFountain: "Stylo plume",
+  brushBrush: "Pinceau",
+  brushCalligraphy: "Calligraphie",
+  brushMarker: "Marqueur",
+  brushPencil: "Crayon à papier",
+  brushCharcoal: "Fusain",
+  brushAirbrush: "Aérographe",
+  brushWatercolor: "Aquarelle",
   optOpacity: "Opacité",
   colBlack: "Noir",
   colRed: "Rouge",
@@ -3570,6 +3774,22 @@ const TRANSLATIONS: Record<string, Translations> = {
 };
 
 export function getTranslations(lang: string): Translations {
+  const base = withFallback(lang);
+  if (!isMac) return base;
+  // macOS: "⌘Z" where the texts say "Ctrl+Z".
+  let mac = MAC_TEXTS.get(lang);
+  if (!mac) {
+    mac = Object.fromEntries(
+      Object.entries(base).map(([k, v]) => [k, typeof v === "string" ? macShortcuts(v) : v]),
+    ) as Translations;
+    MAC_TEXTS.set(lang, mac);
+  }
+  return mac;
+}
+
+const MAC_TEXTS = new Map<string, Translations>();
+
+function withFallback(lang: string): Translations {
   const t = TRANSLATIONS[lang];
   if (!t || t === EN) return EN;
   // Fill optional keys that the chosen language hasn't translated with the

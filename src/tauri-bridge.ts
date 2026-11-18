@@ -52,6 +52,11 @@ export async function renameFile(from: string, to: string): Promise<void> {
   return call<void>("rename_file", { from, to });
 }
 
+/** The common fonts (models.SYSTEM_FONTS) installed on this computer. */
+export async function listSystemFonts(): Promise<string[]> {
+  return call<string[]>("list_system_fonts", {});
+}
+
 /** Returns the number of pages in the PDF at `filePath`. */
 export async function getPageCount(filePath: string): Promise<number> {
   return call<number>("get_page_count", { filePath });
@@ -102,9 +107,22 @@ export interface StartupArgs {
   shouldPrint: boolean;
   /** A temp copy never saved (pages dragged out to this window). */
   unsaved?: boolean;
+  /** A tab moved from another window: Save writes back to this file. */
+  savePath?: string | null;
+  /** That tab had unsaved changes. */
+  dirty?: boolean;
+  /** The password of a protected document moved from another window. */
+  password?: string | null;
+  /** The page that tab showed (1-based; 0: the first). */
+  page?: number;
 }
 
 /** Returns the CLI arguments parsed at startup (file path and print flag). */
+/** Opens `path` (a file the user already chose) in a new EzReader window. */
+export async function openFileInNewWindow(path: string): Promise<void> {
+  return call<void>("open_file_in_new_window", { path });
+}
+
 export async function getStartupArgs(): Promise<StartupArgs> {
   return call<StartupArgs>("get_startup_args");
 }
@@ -115,6 +133,14 @@ export async function checkPdfAssociation(): Promise<boolean> {
 }
 
 /** Writes ProgID and .pdf association into HKCU (no admin required). */
+/**
+ * True when EzReader is the app PDFs open with: Windows' own choice for
+ * .pdf (installer, portable or Store version), or xdg-mime on Linux.
+ */
+export async function isDefaultPdfReader(): Promise<boolean> {
+  return call<boolean>("is_default_pdf_reader");
+}
+
 export async function registerPdfHandler(): Promise<void> {
   return call<void>("register_pdf_handler");
 }
@@ -195,6 +221,29 @@ export async function openDefaultAppsSettings(): Promise<void> {
 /** Opens an http/https URL in the system default browser. */
 export async function openUrl(url: string): Promise<void> {
   return call<void>("open_url", { url });
+}
+
+/** How this copy was installed: decides what "update" does. */
+export type UpdateChannel = "store" | "installer" | "portable" | "deb" | "homebrew" | "dmg" | "other";
+
+export interface UpdateStatus {
+  current: string;
+  latest: string;
+  upToDate: boolean;
+  channel: UpdateChannel;
+}
+
+/** What the update button did (see src-tauri/src/commands/update.rs). */
+export type UpdateOutcome = "restarting" | "opened" | "otherWindows";
+
+/** Asks GitHub for the latest release. Rejects offline. */
+export async function checkForUpdate(): Promise<UpdateStatus> {
+  return call<UpdateStatus>("check_for_update");
+}
+
+/** Installs the latest release; on "restarting" the app closes and reopens. */
+export async function installUpdate(): Promise<UpdateOutcome> {
+  return call<UpdateOutcome>("install_update");
 }
 
 /** One page of the document built by `rearrangePages`, in output order. */
@@ -401,6 +450,31 @@ export async function openPagesInNewWindow(
   inputPath: string, pages: number[], name: string, x: number, y: number,
 ): Promise<void> {
   return call<void>("open_pages_in_new_window", { inputPath, pages, name, x, y });
+}
+
+/**
+ * A tab is dragged out of the title bar, the pointer at the screen point
+ * (`x`, `y`): true when another EzReader window is under it (it then shows
+ * the tab would land there).
+ */
+export async function tabDragHover(x: number, y: number): Promise<boolean> {
+  return call<boolean>("tab_drag_hover", { x, y });
+}
+
+/** The tab drag is over. */
+export async function tabDragEnd(): Promise<void> {
+  return call<void>("tab_drag_end");
+}
+
+/**
+ * Moves a tab to the EzReader window under the screen point (`x`, `y`), or
+ * to a new window there when there is none and `allowNew`. `name`: the file
+ * is a temp copy shown under that name. Says what happened.
+ */
+export async function moveTab(
+  x: number, y: number, tab: StartupArgs, name: string | null, allowNew: boolean,
+): Promise<"merged" | "window" | "stayed"> {
+  return call<"merged" | "window" | "stayed">("move_tab", { x, y, tab, name, allowNew });
 }
 
 /**

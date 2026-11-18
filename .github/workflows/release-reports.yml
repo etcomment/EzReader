@@ -1,0 +1,274 @@
+name: Release reports
+
+# Attaches to a GitHub release one zip, ezreader-reports.zip, holding:
+#   - a security report (PDF): npm audit, cargo deny, open CodeQL alerts and
+#     the fuzzing jobs of the Security workflow, checked on the release commit;
+#   - a performance report (PDF) and its raw measurements, from the load test;
+#   - the software bills of materials (CycloneDX) of the JavaScript and Rust
+#     dependencies.
+# One file keeps the release page down to the packages. The zip has the same
+# name on every release, so releases/latest/download/ezreader-reports.zip in
+# the README always gives the newest one.
+#
+# Called by the Release workflow on the draft release, before it is
+# published: a published release is immutable, so nothing can be added to it.
+# Run by hand on a published release, it still makes the zip, as an artifact
+# of the run, but leaves the release alone.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag (e.g. v1.0.1)
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag de la release (ex: v1.0.0)'
+        required: true
+        type: string
+
+# Read-only by default: each job asks for the write access it needs.
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  security:
+    name: Security report and SBOMs
+    runs-on: ubuntu-latest
+    # Reads the CodeQL alerts and the Security workflow's runs.
+    permissions:
+      contents: read
+      security-events: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+
+      # The report tools (report script, load test, Playwright) come from the
+      # workflow's own commit, so that the reports of a release made before
+      # they existed can be added too. For a new release it is the same commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: .report-tools
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            .report-tools/package-lock.json
+
+      - name: Install dependencies and Chromium
+        run: |
+          npm ci
+          npm ci --prefix .report-tools
+          (cd .report-tools && npx playwright install --with-deps chromium)
+
+      - name: Version and commit
+        id: meta
+        run: |
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: SCA - npm audit
+        run: npm audit --omit=dev --json > npm-audit.json || true
+
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-deny,cargo-cyclonedx
+
+      - name: SCA - cargo deny
+        run: |
+          # A release older than src-tauri/deny.toml is checked with today's policy.
+          CONFIG=src-tauri/deny.toml
+          [ -f "$CONFIG" ] || CONFIG=.report-tools/src-tauri/deny.toml
+          cargo deny -L info --manifest-path src-tauri/Cargo.toml --format json --config "$CONFIG" \
+            check advisories licenses bans sources 2> cargo-deny.jsonl || true
+
+      - name: SAST - open CodeQL alerts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/code-scanning/alerts?state=open&tool_name=CodeQL&per_page=100" \
+            > codeql-alerts.json || echo null > codeql-alerts.json
+
+      - name: Dynamic - fuzzing jobs of the Security workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          # The run on the release commit, else the latest one on main.
+          RUN=$(gh api "repos/${{ github.repository }}/actions/workflows/security.yml/runs?head_sha=$SHA&status=completed&per_page=1" -q '.workflow_runs[0]')
+          if [ -z "$RUN" ] || [ "$RUN" = "null" ]; then
+            RUN=$(gh api "repos/${{ github.repository }}/actions/workflows/security.yml/runs?branch=main&status=completed&per_page=1" -q '.workflow_runs[0]')
+          fi
+          if [ -n "$RUN" ] && [ "$RUN" != "null" ]; then
+            ID=$(echo "$RUN" | jq -r .id)
+            JOBS=$(gh api "repos/${{ github.repository }}/actions/runs/$ID/jobs?per_page=100" -q '.jobs')
+            echo "$RUN" | jq --argjson jobs "$JOBS" '{html_url, head_sha, created_at, jobs: [$jobs[] | {name, conclusion}]}' > security-jobs.json
+          else
+            echo null > security-jobs.json
+          fi
+
+      - name: Software bills of materials (CycloneDX)
+        run: |
+          npm sbom --sbom-format cyclonedx --omit dev > "ezreader-${TAG#v}-sbom-npm.cdx.json"
+          cargo cyclonedx --manifest-path src-tauri/Cargo.toml --format json --spec-version 1.5
+          cp src-tauri/*.cdx.json "ezreader-${TAG#v}-sbom-cargo.cdx.json"
+
+      - name: Security report
+        run: |
+          node .report-tools/scripts/release-report.mjs security \
+            --version "${{ steps.meta.outputs.version }}" --commit "${{ steps.meta.outputs.sha }}" \
+            --repo "${{ github.repository }}" \
+            --npm npm-audit.json --deny cargo-deny.jsonl --codeql codeql-alerts.json --runs security-jobs.json \
+            --out "ezreader-${TAG#v}-security-report.pdf"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reports-security
+          path: |
+            ezreader-${{ steps.meta.outputs.version }}-security-report.pdf
+            ezreader-${{ steps.meta.outputs.version }}-sbom-npm.cdx.json
+            ezreader-${{ steps.meta.outputs.version }}-sbom-cargo.cdx.json
+          if-no-files-found: error
+
+  performance:
+    name: Performance report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+
+      # The report tools (report script, load test, Playwright) come from the
+      # workflow's own commit, so that the reports of a release made before
+      # they existed can be added too. For a new release it is the same commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: .report-tools
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            .report-tools/package-lock.json
+
+      - name: Install dependencies and Chromium
+        run: |
+          npm ci
+          npm ci --prefix .report-tools
+          (cd .report-tools && npx playwright install --with-deps chromium)
+
+      - name: Build the front end
+        run: npm run build
+
+      # The same quick load test as on pull requests. A figure past its
+      # threshold is shown in the report rather than blocking the release.
+      - name: Load test
+        continue-on-error: true
+        run: |
+          # The release's front end, driven by the load test of the tools.
+          rm -rf .report-tools/dist && cp -r dist .report-tools/dist
+          node .report-tools/perf/make-big-pdf.mjs "$RUNNER_TEMP/big.pdf" 1500
+          set -o pipefail
+          node .report-tools/perf/stress.mjs "$RUNNER_TEMP/big.pdf" --rounds 3 --out "$PWD/ezreader-${TAG#v}-perf-results.json" 2>&1 | tee perf-log.txt
+
+      - name: Performance report
+        run: |
+          node .report-tools/scripts/release-report.mjs performance \
+            --version "${TAG#v}" --commit "$(git rev-parse HEAD)" \
+            --results "ezreader-${TAG#v}-perf-results.json" --log perf-log.txt \
+            --out "ezreader-${TAG#v}-performance-report.pdf"
+
+      # The raw measurements are missing if the load test crashed: the report
+      # says so, and the zip goes out without them.
+      - name: Version
+        id: meta
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reports-performance
+          path: |
+            ezreader-${{ steps.meta.outputs.version }}-performance-report.pdf
+            ezreader-${{ steps.meta.outputs.version }}-perf-results.json
+          if-no-files-found: error
+
+  # Zips whatever reports were produced and attaches the zip to the release.
+  # Also removes the separate report files that releases used to carry, so
+  # running this by hand on an older release tidies its page too.
+  bundle:
+    name: Attach the reports zip
+    needs: [security, performance]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: reports-*
+          path: reports
+          merge-multiple: true
+
+      - name: Zip the reports
+        run: |
+          shopt -s nullglob
+          files=(reports/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No report was produced."
+            exit 1
+          fi
+          (cd reports && zip -9 ../ezreader-reports.zip *)
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ezreader-reports
+          path: ezreader-reports.zip
+          if-no-files-found: error
+
+      # On a draft, attach the zip. On a published release, only if it is
+      # still mutable (published before immutability was turned on): then the
+      # separate report files it used to carry are removed too.
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != "true" ] &&
+             [ "$(gh api "repos/$GH_REPO/releases/tags/$TAG" --jq '.immutable // false')" = "true" ]; then
+            echo "::warning title=Release is immutable::$TAG is published and immutable: the zip is only kept as this run's artifact."
+            exit 0
+          fi
+          gh release upload "$TAG" --clobber ezreader-reports.zip
+
+          V="${TAG#v}"
+          for old in ezreader-security-report.pdf ezreader-performance-report.pdf \
+                     "ezreader-$V-security-report.pdf" "ezreader-$V-performance-report.pdf" \
+                     "ezreader-$V-perf-results.json" \
+                     "ezreader-$V-sbom-npm.cdx.json" "ezreader-$V-sbom-cargo.cdx.json"; do
+            if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qxF "$old"; then
+              gh release delete-asset "$TAG" "$old" --yes
+            fi
+          done
+
+      # A failed report job still fails the run, even though the zip went out.
+      - name: Check that both reports were made
+        if: needs.security.result != 'success' || needs.performance.result != 'success'
+        run: |
+          echo "::error::Security report: ${{ needs.security.result }}, performance report: ${{ needs.performance.result }}"
+          exit 1

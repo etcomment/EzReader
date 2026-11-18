@@ -8,17 +8,18 @@ import {
   MAX_SCALE,
 } from "./models";
 import { ToolRow, type SignatureChip } from "./tool-row";
-import type { Translations } from "./i18n";
+import { getTranslations, type Translations } from "./i18n";
+import { isMac } from "./platform";
+import { MacMenu } from "./mac-menu";
 import {
   ICON_INFO,
-  ICON_FULLSCREEN,
   ICON_PRESENT,
-  ICON_FULLSCREEN_EXIT,
   ICON_EYE,
   ICON_PEN,
   ICON_EDIT_TEXT,
   ICON_PAGES_1,
   ICON_PAGES_2,
+  ICON_PAGES_2_EVEN,
   ICON_SIDEBAR,
   ICON_SAVE,
   ICON_UNDO,
@@ -57,7 +58,7 @@ export type ToolbarEvent =
   | { type: "zoom-set"; scale: number }
   | { type: "zoom-reset" }
   | { type: "zoom-real" }
-  | { type: "columns"; n: number | null }
+  | { type: "columns"; n: number | null; even?: boolean }
   | { type: "scroll-mode"; mode: "vertical" | "horizontal" }
   | { type: "info" }
   | { type: "fullscreen" }
@@ -87,15 +88,22 @@ export type ToolbarEvent =
   | { type: "print" }
   | { type: "settings" }
   | { type: "undo" }
-  | { type: "redo" };
+  | { type: "redo" }
+  | { type: "find" }
+  | { type: "insert-image" }
+  | { type: "insert-image-page" };
 
 type EventHandler = (e: ToolbarEvent) => void;
 
 interface MenuItemDef {
   label: keyof Translations;
+  /** macOS: in the app menu (EzReader ▸ Settings…). */
+  appMenu?: boolean;
   shortcut?: string;
   action: () => void;
   requiresDoc?: boolean;
+  /** Shows a mark while on: a dot for one-of-several choices, a tick for a toggle. */
+  mark?: { id: string; kind: "radio" | "check" };
 }
 
 interface MenuDef {
@@ -107,7 +115,7 @@ interface MenuDef {
 /** Actions that must wait until pending changes are validated or discarded. */
 const GUARDED = new Set<ToolbarEvent["type"]>([
   "open", "save", "save-as", "export", "compress", "password", "images-to-pdf", "ocr", "print", "settings", "split", "rotate",
-  "insert-blank", "insert-pdf", "extract-pages", "present",
+  "insert-blank", "insert-pdf", "insert-image", "insert-image-page", "extract-pages", "present",
 ]);
 
 export class Toolbar {
@@ -125,6 +133,10 @@ export class Toolbar {
   private dropdowns = new Map<string, HTMLElement>();
   private menuButtons = new Map<string, HTMLButtonElement>();
   private docMenuEntries: HTMLButtonElement[] = [];
+  /** Menu entries that show a state (layout, thumbnails), by mark id. */
+  private markEntries = new Map<string, HTMLButtonElement>();
+  /** Shortcut labels, kept raw so "Shift" can be translated. */
+  private shortcutEls: [HTMLElement, string][] = [];
   private docTitleEl!: HTMLElement;
   private docTitleName!: HTMLButtonElement;
   private docTitleInput!: HTMLInputElement;
@@ -141,7 +153,10 @@ export class Toolbar {
   /** Page brightness: a button that opens a slider. */
   readonly brightness = new BrightnessButton();
   private zoomInput!: HTMLInputElement;
-  private columnBtns: HTMLButtonElement[] = [];
+  /** One page / two pages (odd left / even left): one button that cycles through the 3 layouts. */
+  private pagesBtn!: HTMLButtonElement;
+  private shownColumns = 1;
+  private shownEvenSpread = false;
   private infoBtn!: HTMLButtonElement;
   private sidebarBtn!: HTMLButtonElement;
   private saveBtn!: HTMLButtonElement;
@@ -149,6 +164,9 @@ export class Toolbar {
   private lockTitles = { on: "Protected: remove the password", off: "Protect with a password" };
   private locked = false;
   private _lastScale = CSS_UNITS;
+
+  /** macOS: the same menus, at the top of the screen. */
+  private macMenu: MacMenu | null = null;
 
   private _i18nText  = new Map<HTMLElement, keyof Translations>();
   private _i18nTitle = new Map<HTMLElement, keyof Translations>();
@@ -159,6 +177,12 @@ export class Toolbar {
     this.search = new SearchPill();
     this.tools = new ToolRow((e) => this.emit(e), () => this.allowed());
     this.buildMenuBar();
+    if (isMac && "__TAURI_INTERNALS__" in window) {
+      document.body.classList.add("mac");
+      const welcomeKeys = document.querySelector(".welcome-shortcut");
+      if (welcomeKeys) welcomeKeys.innerHTML = "<kbd>⌘</kbd> <kbd>O</kbd>";
+      this.macMenu = new MacMenu(this.getMenuDefs(), getTranslations("en"));
+    }
     this.buildContextToolbar();
     this.setupMenuInteraction();
   }
@@ -177,8 +201,11 @@ export class Toolbar {
     this.lockTitles = { on: t.ttLockOn ?? "Protected: remove the password", off: t.ttLockOff ?? "Protect with a password" };
     this.setProtected(this.locked);
     this.docTitleName.title = this.docName ? this.renameTitle : "";
+    const shift = t.kbdShift ?? "Shift";
+    for (const [el, raw] of this.shortcutEls) el.textContent = raw.replace("Shift", shift);
     this.search.applyTranslations(t);
     this.tools.applyTranslations(t);
+    this.macMenu?.applyTranslations(t);
   }
 
   private reg(el: HTMLElement, text?: keyof Translations, title?: keyof Translations): void {
@@ -251,16 +278,43 @@ export class Toolbar {
   /** Fit modes are menu-only now; kept so callers need not care. */
   updateFitMode(_mode: "none" | "fit-width" | "fit-height" | "fit-page"): void {}
 
-  /** Highlights the one-page / two-page buttons. */
-  updateLayout(columns: number | null, mode: "vertical" | "horizontal"): void {
-    this.columnBtns.forEach(b => {
-      b.classList.toggle("active", mode === "vertical" && Number(b.dataset["cols"]) === columns);
-    });
+  /**
+   * Shows the layout on the pages button: `columns` is the forced count (null:
+   * as many as fit), `shown` the number of pages per row on screen, and `even`
+   * whether 2-page mode starts with even pages on the left ([2 | 3]).
+   */
+  updateLayout(columns: number | null, mode: "vertical" | "horizontal", shown: number = columns ?? 1, even = false): void {
+    this.shownColumns = mode === "vertical" && shown >= 2 ? 2 : 1;
+    this.shownEvenSpread = this.shownColumns === 2 && even;
+    const state = this.shownColumns === 1 ? "1" : this.shownEvenSpread ? "2-even" : "2-odd";
+    this.pagesBtn.innerHTML = state === "1" ? ICON_PAGES_1 : state === "2-odd" ? ICON_PAGES_2 : ICON_PAGES_2_EVEN;
+    this.pagesBtn.dataset["cols"] = state;
+    // The tooltip says what a click does next in the cycle: [1] -> [1|2] -> [2|3] -> [1].
+    const nextKey: keyof Translations = state === "1" ? "ttPages2" : state === "2-odd" ? "ttPages2Even" : "ttPages1";
+    const nextFb = state === "1" ? "Two pages (odd on left)" : state === "2-odd" ? "Two pages (even on left)" : "One page per row";
+    this._i18nTitle.set(this.pagesBtn, nextKey);
+    this.pagesBtn.title = this._lastT?.[nextKey] ?? nextFb;
+    this.setMark("cols-1", mode === "vertical" && columns === 1);
+    this.setMark("cols-2", mode === "vertical" && columns === 2 && !even);
+    this.setMark("cols-2-even", mode === "vertical" && columns === 2 && even);
+    this.setMark("scroll-vertical", mode === "vertical");
+    this.setMark("scroll-horizontal", mode === "horizontal");
+  }
+
+  private setMark(id: string, on: boolean): void {
+    this.macMenu?.setMark(id, on);
+    const entry = this.markEntries.get(id);
+    if (!entry) return;
+    entry.classList.toggle("marked", on);
+    entry.setAttribute("aria-checked", String(on));
   }
 
   setInfoOpen(open: boolean): void {
     this.infoBtn.classList.toggle("active", open);
   }
+
+  /** The file name in the title bar (the tab strip holds it in the active tab). */
+  get titleElement(): HTMLElement { return this.docTitleEl; }
 
   /** Shows the open file's name in the title bar, with a dot while it has unsaved changes. */
   setDocTitle(name: string | null, dirty: boolean): void {
@@ -288,6 +342,7 @@ export class Toolbar {
   updateSidebar(visible: boolean): void {
     this.sidebarBtn.classList.toggle("active", visible);
     this.sidebarBtn.setAttribute("aria-pressed", String(visible));
+    this.setMark("sidebar", visible);
   }
 
   setLoaded(loaded: boolean): void {
@@ -295,12 +350,13 @@ export class Toolbar {
     for (const btn of this.docMenuEntries) {
       btn.disabled = !loaded;
     }
+    this.macMenu?.setLoaded(loaded);
     if (!loaded) this.search.close();
   }
 
   getStyle(): ActiveToolState { return this.tools.getStyle(); }
 
-  showTextStyles(state: Pick<ActiveToolState, "color" | "fontSize" | "bold" | "italic" | "underline"> & { fontFamily?: FontFamilyValue; backgroundColor?: RgbColor | null }): void {
+  showTextStyles(state: Pick<ActiveToolState, "color" | "fontSize" | "bold" | "italic" | "underline"> & { fontFamily?: FontFamilyValue; fontName?: string | null; backgroundColor?: RgbColor | null }): void {
     this.tools.showTextStyles(state);
   }
 
@@ -311,6 +367,21 @@ export class Toolbar {
   }
 
   hideShapeStyles(): void { this.tools.hideShapeStyles(); }
+
+  /** The common fonts installed on this computer, offered for text. */
+  setSystemFonts(names: string[]): void { this.tools.setSystemFonts(names); }
+
+  showSignatureStyles(color: RgbColor): void { this.tools.showSignatureStyles(color); }
+  hideSignatureStyles(): void { this.tools.hideSignatureStyles(); }
+
+  showHighlightStyles(state: { color: RgbColor; opacity: number }): void { this.tools.showHighlightStyles(state); }
+  hideHighlightStyles(): void { this.tools.hideHighlightStyles(); }
+
+  /** The options of the chosen tool (or selected annotation), for the studio panel. */
+  get toolOptions(): HTMLElement { return this.tools.options; }
+
+  /** Told when the options on show change: their title (null: none), and the mode. */
+  onToolOptions(h: (title: string | null, mode: AppMode) => void): void { this.tools.onSync = h; }
 
   /** While a save runs: the Save button pulses. */
   setSaving(on: boolean): void {
@@ -324,17 +395,6 @@ export class Toolbar {
     void this.saveBtn.offsetWidth; // restart the animation
     this.saveBtn.classList.add(cls);
     window.setTimeout(() => this.saveBtn.classList.remove(cls), 1200);
-  }
-
-  private fullscreenBtn!: HTMLButtonElement;
-
-  /** Shows whether the window is full screen (the button then exits it). */
-  setFullscreen(on: boolean): void {
-    this.fullscreenBtn.innerHTML = on ? ICON_FULLSCREEN_EXIT : ICON_FULLSCREEN;
-    this.fullscreenBtn.classList.toggle("active", on);
-    this.fullscreenBtn.setAttribute("aria-pressed", String(on));
-    this._i18nTitle.set(this.fullscreenBtn, on ? "ttFullscreenExit" : "ttFullscreen");
-    this.fullscreenBtn.title = this._lastT?.[on ? "ttFullscreenExit" : "ttFullscreen"] ?? (on ? "Exit full screen (F11 or Esc)" : "Full screen (F11)");
   }
 
   setActiveSignature(id: string | null): void { this.tools.setActiveSignature(id); }
@@ -365,69 +425,76 @@ export class Toolbar {
   // ── Menu Bar ────────────────────────────────────────────────────────────────
 
   private getMenuDefs(): MenuDef[] {
+    const go = (e: ToolbarEvent) => () => this.emit(e);
     return [
       {
         id: "file",
         label: "menuFile",
         items: [
-          { label: "btnOpen", shortcut: "Ctrl+O", action: () => this.emit({ type: "open" }) },
+          { label: "menuOpen", shortcut: "Ctrl+O", action: go({ type: "open" }) },
           null,
-          { label: "btnSave", shortcut: "Ctrl+S", action: () => this.emit({ type: "save" }), requiresDoc: true },
-          { label: "btnSaveAs", shortcut: "Ctrl+Shift+S", action: () => this.emit({ type: "save-as" }), requiresDoc: true },
-          { label: "btnExport", action: () => this.emit({ type: "export" }), requiresDoc: true },
-          { label: "btnCompress", shortcut: "Ctrl+Shift+E", action: () => this.emit({ type: "compress" }), requiresDoc: true },
-          { label: "menuPassword", action: () => this.emit({ type: "password" }), requiresDoc: true },
-          { label: "menuImagesToPdf", action: () => this.emit({ type: "images-to-pdf" }) },
-          { label: "menuOcr", action: () => this.emit({ type: "ocr" }) },
+          { label: "btnSave", shortcut: "Ctrl+S", action: go({ type: "save" }), requiresDoc: true },
+          { label: "menuSaveAs", shortcut: "Ctrl+Shift+S", action: go({ type: "save-as" }), requiresDoc: true },
           null,
-          { label: "menuPrint", shortcut: "Ctrl+P", action: () => this.emit({ type: "print" }), requiresDoc: true },
+          { label: "menuExport", action: go({ type: "export" }), requiresDoc: true },
+          { label: "menuPrintDialog", shortcut: "Ctrl+P", action: go({ type: "print" }), requiresDoc: true },
           null,
-          { label: "menuSettings", action: () => this.emit({ type: "settings" }) },
+          { label: "menuSettingsDialog", shortcut: "Ctrl+,", action: go({ type: "settings" }), appMenu: true },
         ],
       },
       {
         id: "edit",
         label: "menuEdit",
         items: [
-          { label: "menuUndo", shortcut: "Ctrl+Z", action: () => this.emit({ type: "undo" }), requiresDoc: true },
-          { label: "menuRedo", shortcut: "Ctrl+Y", action: () => this.emit({ type: "redo" }), requiresDoc: true },
+          { label: "menuUndo", shortcut: "Ctrl+Z", action: go({ type: "undo" }), requiresDoc: true },
+          { label: "menuRedo", shortcut: "Ctrl+Y", action: go({ type: "redo" }), requiresDoc: true },
+          null,
+          { label: "menuFind", shortcut: "Ctrl+F", action: go({ type: "find" }), requiresDoc: true },
+          { label: "menuSelectAllPages", action: go({ type: "select-all-pages" }), requiresDoc: true },
+          null,
+          { label: "menuInsertBlank", action: go({ type: "insert-blank" }), requiresDoc: true },
+          { label: "menuInsertPdf", action: go({ type: "insert-pdf" }), requiresDoc: true },
+          { label: "menuInsertImage", action: go({ type: "insert-image" }), requiresDoc: true },
+          { label: "menuInsertImagePage", action: go({ type: "insert-image-page" }), requiresDoc: true },
+          { label: "menuRotate90", action: go({ type: "rotate" }), requiresDoc: true },
+          null,
+          { label: "menuExtractPages", action: go({ type: "extract-pages" }), requiresDoc: true },
+          { label: "menuSplit", action: go({ type: "split" }), requiresDoc: true },
         ],
       },
       {
         id: "view",
         label: "menuView",
         items: [
-          { label: "menuZoomIn", shortcut: "Ctrl++", action: () => this.emit({ type: "zoom-in" }), requiresDoc: true },
-          { label: "menuZoomOut", shortcut: "Ctrl+−", action: () => this.emit({ type: "zoom-out" }), requiresDoc: true },
-          { label: "menuResetZoom", shortcut: "Ctrl+0", action: () => this.emit({ type: "zoom-reset" }), requiresDoc: true },
+          { label: "menuZoomIn", shortcut: "Ctrl++", action: go({ type: "zoom-in" }), requiresDoc: true },
+          { label: "menuZoomOut", shortcut: "Ctrl+-", action: go({ type: "zoom-out" }), requiresDoc: true },
+          { label: "menuActualSize", shortcut: "Ctrl+0", action: go({ type: "zoom-reset" }), requiresDoc: true },
           null,
-          { label: "menuFitWidth", action: () => this.emit({ type: "fit-width" }), requiresDoc: true },
-          { label: "menuFitHeight", action: () => this.emit({ type: "fit-height" }), requiresDoc: true },
+          { label: "menuFitWidth", action: go({ type: "fit-width" }), requiresDoc: true },
+          { label: "menuFitHeight", action: go({ type: "fit-height" }), requiresDoc: true },
           null,
-          { label: "ttPages1", action: () => this.emit({ type: "columns", n: 1 }), requiresDoc: true },
-          { label: "ttPages2", action: () => this.emit({ type: "columns", n: 2 }), requiresDoc: true },
-          { label: "menuPages3", action: () => this.emit({ type: "columns", n: 3 }), requiresDoc: true },
-          { label: "ttScrollVertical", action: () => this.emit({ type: "scroll-mode", mode: "vertical" }), requiresDoc: true },
-          { label: "menuScrollHorizontal", action: () => this.emit({ type: "scroll-mode", mode: "horizontal" }), requiresDoc: true },
+          { label: "ttPages1", action: go({ type: "columns", n: 1, even: false }), requiresDoc: true, mark: { id: "cols-1", kind: "radio" } },
+          { label: "ttPages2", action: go({ type: "columns", n: 2, even: false }), requiresDoc: true, mark: { id: "cols-2", kind: "radio" } },
+          { label: "ttPages2Even", action: go({ type: "columns", n: 2, even: true }), requiresDoc: true, mark: { id: "cols-2-even", kind: "radio" } },
           null,
-          { label: "menuRotate", action: () => this.emit({ type: "rotate" }), requiresDoc: true },
-          { label: "menuPageSidebar", action: () => this.emit({ type: "toggle-sidebar" }), requiresDoc: true },
+          { label: "ttScrollVertical", action: go({ type: "scroll-mode", mode: "vertical" }), requiresDoc: true, mark: { id: "scroll-vertical", kind: "radio" } },
+          { label: "menuScrollHorizontal", action: go({ type: "scroll-mode", mode: "horizontal" }), requiresDoc: true, mark: { id: "scroll-horizontal", kind: "radio" } },
           null,
-          { label: "menuPresent", shortcut: "F5", action: () => this.emit({ type: "present" }), requiresDoc: true },
-          { label: "ttFullscreen", shortcut: "F11", action: () => this.emit({ type: "fullscreen" }) },
+          { label: "menuPageSidebar", action: go({ type: "toggle-sidebar" }), requiresDoc: true, mark: { id: "sidebar", kind: "check" } },
+          null,
+          { label: "menuPresent", shortcut: "F5", action: go({ type: "present" }), requiresDoc: true },
+          { label: "menuFullscreen", shortcut: "F11", action: go({ type: "fullscreen" }) },
         ],
       },
       {
-        id: "pages",
-        label: "menuPages",
+        id: "tools",
+        label: "menuTools",
         items: [
-          { label: "menuSelectAllPages", action: () => this.emit({ type: "select-all-pages" }), requiresDoc: true },
+          { label: "btnCompress", shortcut: "Ctrl+Shift+E", action: go({ type: "compress" }), requiresDoc: true },
+          { label: "menuProtect", action: go({ type: "password" }), requiresDoc: true },
           null,
-          { label: "menuInsertBlank", action: () => this.emit({ type: "insert-blank" }), requiresDoc: true },
-          { label: "menuInsertPdf", action: () => this.emit({ type: "insert-pdf" }), requiresDoc: true },
-          { label: "menuExtractPages", action: () => this.emit({ type: "extract-pages" }), requiresDoc: true },
-          null,
-          { label: "menuSplit", action: () => this.emit({ type: "split" }), requiresDoc: true },
+          { label: "menuOcr", action: go({ type: "ocr" }) },
+          { label: "menuImagesToPdf", action: go({ type: "images-to-pdf" }) },
         ],
       },
     ];
@@ -437,6 +504,7 @@ export class Toolbar {
     const menus = this.getMenuDefs();
     for (const menu of menus) {
       const wrapper = document.createElement("div");
+      wrapper.className = "menubar-menu";
       wrapper.style.position = "relative";
       wrapper.style.display = "inline-block";
 
@@ -450,6 +518,8 @@ export class Toolbar {
       // Dropdown panel
       const dropdown = document.createElement("div");
       dropdown.className = "menu-dropdown";
+      // Room on the left for the dots and ticks, so every label lines up.
+      if (menu.items.some((i) => i?.mark)) dropdown.classList.add("has-marks");
 
       for (const item of menu.items) {
         if (item === null) {
@@ -464,13 +534,22 @@ export class Toolbar {
         entry.tabIndex = -1;
 
         const labelSpan = document.createElement("span");
+        labelSpan.className = "menu-label";
         this.reg(labelSpan, item.label);
         entry.append(labelSpan);
+
+        if (item.mark) {
+          entry.classList.add(`menu-${item.mark.kind}`);
+          entry.setAttribute("role", item.mark.kind === "radio" ? "menuitemradio" : "menuitemcheckbox");
+          entry.setAttribute("aria-checked", "false");
+          this.markEntries.set(item.mark.id, entry);
+        }
 
         if (item.shortcut) {
           const shortcutSpan = document.createElement("span");
           shortcutSpan.className = "shortcut";
           shortcutSpan.textContent = item.shortcut;
+          this.shortcutEls.push([shortcutSpan, item.shortcut]);
           entry.append(shortcutSpan);
         }
 
@@ -673,7 +752,8 @@ export class Toolbar {
   private buildContextToolbar(): void {
     const main = document.createElement("div");
     main.className = "tb-row tb-main";
-    this.contextEl.append(main, this.tools.row, this.tools.options);
+    // The options of the tools live in the studio panel (see StudioPanel).
+    this.contextEl.append(main, this.tools.row);
 
     // Page thumbnails sidebar toggle
     this.sidebarBtn = this.btn(ICON_SIDEBAR, "Show or hide the page thumbnails", "icon-btn");
@@ -681,12 +761,7 @@ export class Toolbar {
     this.sidebarBtn.addEventListener("click", () => this.emit({ type: "toggle-sidebar" }));
 
     // Save, then undo / redo
-    this.saveBtn = this.btn(ICON_SAVE, "Save (Ctrl+S)", "btn tb-save");
-    const saveLabel = document.createElement("span");
-    saveLabel.textContent = "Save";
-    saveLabel.className = "tb-save-label";
-    this.saveBtn.append(saveLabel);
-    this.reg(saveLabel, "btnSave");
+    this.saveBtn = this.btn(ICON_SAVE, "Save (Ctrl+S)", "icon-btn tb-square tb-save");
     this.reg(this.saveBtn, undefined, "ttSave");
     this.saveBtn.addEventListener("click", () => this.emit({ type: "save" }));
 
@@ -744,14 +819,18 @@ export class Toolbar {
     const brightnessSeg = this.segment(this.brightness.el);
     brightnessSeg.classList.add("tb-brightness");
 
-    // One page / two pages per row; clicking the active one goes back to "as many as fit".
-    const colDefs: [number, string, keyof Translations][] = [[1, ICON_PAGES_1, "ttPages1"], [2, ICON_PAGES_2, "ttPages2"]];
-    this.columnBtns = colDefs.map(([n, icon, tt]) => {
-      const b = this.btn(icon, `${n}`, "icon-btn");
-      b.dataset["cols"] = String(n);
-      this.reg(b, undefined, tt);
-      b.addEventListener("click", () => this.emit({ type: "columns", n: b.classList.contains("active") ? null : n }));
-      return b;
+    // One button for [1] / [1 | 2] / [2 | 3]: shows the current layout icon
+    // and cycles to the next one on click.
+    this.pagesBtn = this.btn(ICON_PAGES_1, "Two pages (odd on left)", "icon-btn tb-pages");
+    this.reg(this.pagesBtn, undefined, "ttPages2");
+    this.pagesBtn.addEventListener("click", () => {
+      if (this.shownColumns === 1) {
+        this.emit({ type: "columns", n: 2, even: false });
+      } else if (!this.shownEvenSpread) {
+        this.emit({ type: "columns", n: 2, even: true });
+      } else {
+        this.emit({ type: "columns", n: 1, even: false });
+      }
     });
 
     // Read / Annotate / Edit
@@ -778,7 +857,7 @@ export class Toolbar {
       return b;
     });
     const modeSeg = this.segment(...this.modeBtns);
-    const columnsSeg = this.segment(...this.columnBtns);
+    const columnsSeg = this.segment(this.pagesBtn);
     columnsSeg.classList.add("tb-columns");
     modeSeg.classList.add("mode-segment");
 
@@ -797,23 +876,21 @@ export class Toolbar {
     const presentBtn = this.btn(ICON_PRESENT, "Present (F5)", "icon-btn tb-square");
     this.reg(presentBtn, undefined, "ttPresent");
     presentBtn.addEventListener("click", () => this.emit({ type: "present" }));
-    this.fullscreenBtn = this.btn(ICON_FULLSCREEN, "Full screen (F11)", "icon-btn tb-square");
-    this.reg(this.fullscreenBtn, undefined, "ttFullscreen");
-    this.fullscreenBtn.addEventListener("click", () => this.emit({ type: "fullscreen" }));
     const right = document.createElement("div");
     right.className = "toolbar-group tb-right";
-    right.append(exportBtn, compressBtn, this.lockBtn, this.infoBtn, presentBtn, this.fullscreenBtn, this.sep(), this.search.el);
+    right.append(exportBtn, compressBtn, this.lockBtn, this.infoBtn, presentBtn, this.sep(), this.search.el);
 
-    // Left group, Read / Annotate / Edit in the middle of the bar, right group.
+    // Left group (side panel, then Read / Annotate / Edit), right group.
     const left = document.createElement("div");
     left.className = "toolbar-group tb-left";
     left.append(
-      this.sidebarBtn, this.saveBtn, this.segment(undo, redo), this.sep(),
+      this.sidebarBtn, modeSeg, this.sep(),
+      this.saveBtn, this.segment(undo, redo), this.sep(),
       this.segment(...this.pointerBtns),
       this.segment(zoomOut, this.zoomLabel, this.zoomInput, zoomIn, realSizeBtn),
       brightnessSeg, columnsSeg,
     );
-    main.append(left, modeSeg, right);
+    main.append(left, right);
     this.updateLayout(null, "vertical");
     this.syncModeBtns();
 
@@ -839,8 +916,8 @@ export class Toolbar {
     const open = pill.classList.contains("open");
     // Laid out on one line, how much wider than the row the content is, with
     // the search box at its final width (not the one mid-animation). The side
-    // groups stretch to keep the modes centred, so add up what they hold.
-    const [left, modes, right] = Array.from(main.children) as HTMLElement[];
+    // groups stretch to fill the row, so add up what they hold.
+    const [left, right] = Array.from(main.children) as HTMLElement[];
     const gapOf = (el: HTMLElement) => parseFloat(getComputedStyle(el).columnGap) || 0;
     const held = (group: HTMLElement): number => {
       const shown = (Array.from(group.children) as HTMLElement[]).filter((c) => c.offsetWidth > 0);
@@ -850,10 +927,8 @@ export class Toolbar {
       const style = getComputedStyle(main);
       const room = main.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0);
       const rightW = held(right) - pill.offsetWidth + (open ? searchOpen[level] : 34);
-      // The modes sit in the middle when both sides fit in half of what is
-      // left; otherwise they slide over (CSS), and only a row too full for
-      // everything gets compacted.
-      return held(left) + modes.offsetWidth + rightW + 2 * gapOf(main) - room;
+      // Only a row too full for everything gets compacted.
+      return held(left) + rightW + gapOf(main) - room;
     };
     main.style.flexWrap = "nowrap";
     main.classList.remove(...levels);
@@ -868,7 +943,8 @@ export class Toolbar {
 
   /** Switches between reading, annotating and editing; any active tool is dropped. */
   setMode(mode: AppMode): void {
-    if (mode === this.mode || this.refusedReadOnly({ type: "mode-change", mode }) || !this.allowed()) return;
+    const adjusting = document.getElementById("app")?.classList.contains("adjusting") ?? false;
+    if ((mode === this.mode && !adjusting) || this.refusedReadOnly({ type: "mode-change", mode }) || !this.allowed()) return;
     this.mode = mode;
     this.tools.setMode(mode);
     this.syncModeBtns();

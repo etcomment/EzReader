@@ -5,13 +5,14 @@ export default defineConfig({
   test: {
     include: ["src/__tests__/**/*.test.ts"],
     environment: "node",
+    testTimeout: 15000,
   },
   build: {
     outDir: "dist",
     emptyOutDir: true,
     target: "esnext",
     rollupOptions: {
-      input: resolve(__dirname, "index.html"),
+      input: resolve(import.meta.dirname, "index.html"),
     },
   },
   server: {

@@ -1,29 +1,104 @@
 <div align="center">
 
+<img src="src-tauri/icons/128x128@2x.png" width="96" alt="EzReader logo">
+
 # EzReader
 
-**A fast, lightweight PDF reader and editor for Windows and Linux.**
-Read, annotate, sign, edit, reorganize, compress and protect your PDFs. Everything runs on your computer: no account, no subscription, no AI, no telemetry. Free and open source.
+**A fast, lightweight PDF reader and editor for Windows, macOS and Linux.**
 
-[![Latest Release](https://img.shields.io/github/v/release/alxbdn/EzReader?style=flat-square&label=Download)](https://github.com/alxbdn/EzReader/releases/latest)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+Read, annotate, sign, edit, reorganize, compress and protect your PDFs.<br>
+Everything runs on your computer: no account, no subscription, no AI, no telemetry.
+
+[![Release](https://img.shields.io/github/v/release/alxbdn/EzReader?style=flat-square&label=release&color=c4314b)](https://github.com/alxbdn/EzReader/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/alxbdn/EzReader/total?style=flat-square&label=downloads)](https://github.com/alxbdn/EzReader/releases)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational?style=flat-square)](#installation)
+[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-get%20it-0078d4?style=flat-square)](https://apps.microsoft.com/detail/9P9PVN4DRVS8)
+[![License: MIT](https://img.shields.io/github/license/alxbdn/EzReader?style=flat-square)](LICENSE)
+
+[![CI](https://img.shields.io/github/actions/workflow/status/alxbdn/EzReader/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/alxbdn/EzReader/actions/workflows/ci.yml)
+[![Security](https://img.shields.io/github/actions/workflow/status/alxbdn/EzReader/security.yml?branch=main&style=flat-square&label=security%20scans)](https://github.com/alxbdn/EzReader/actions/workflows/security.yml)
+[![Performance](https://img.shields.io/github/actions/workflow/status/alxbdn/EzReader/perf.yml?branch=main&style=flat-square&label=load%20test)](https://github.com/alxbdn/EzReader/actions/workflows/perf.yml)
+[![OpenSSF Best Practices](https://img.shields.io/cii/level/16825?style=flat-square&label=openssf%20best%20practices)](https://www.bestpractices.dev/projects/16825)
+[![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/alxbdn/EzReader?style=flat-square&label=openssf%20scorecard)](https://scorecard.dev/viewer/?uri=github.com/alxbdn/EzReader)
+
+[Install](#installation) · [Features](#features) · [Security](#security-and-privacy) · [Build](#build-from-source) · [Contributing](CONTRIBUTING.md)
+
+<br>
+
+<img src=".github/readme/launcher.jpg" alt="EzReader home screen: one shortcut per task (annotate, sign, redact, manage pages, convert, compress, protect, resize scans, merge)" width="860">
 
 </div>
 
 ---
 
-## Download
+## Installation
 
-**[Download the latest release](https://github.com/alxbdn/EzReader/releases/latest)** and pick the file that suits you:
+Pick your system and paste the command.
 
-| File | What it is |
-|------|------------|
-| `ezreader-<version>-win-x64-setup.exe` | Installer |
-| `ezreader-portable-<version>-win-x64.exe` | Portable app: a single file you can run from anywhere, nothing to install |
-| `ezreader-<version>-win-x64.msix` | Package for the Microsoft Store |
-| `ezreader_<version>_amd64.deb` | Debian / Ubuntu Linux package (`sudo apt install ./ezreader_<version>_amd64.deb`) |
+### Windows
 
-EzReader runs on 64-bit Windows 10 (version 2004 or later), Windows 11, and Ubuntu / Debian Linux (x86_64). The download is about 3–4 MB.
+Windows 10 (2004+) and 11, 64-bit. From the Microsoft Store, in PowerShell or the Terminal:
+
+```powershell
+winget install --id 9P9PVN4DRVS8 --source msstore --accept-package-agreements
+```
+
+Without the Store, this downloads the latest installer from GitHub and runs it:
+
+```powershell
+$u = (irm https://api.github.com/repos/alxbdn/EzReader/releases/latest).assets.browser_download_url -like '*-win-x64-setup.exe'
+iwr "$u" -OutFile "$env:TEMP\ezreader-setup.exe"; & "$env:TEMP\ezreader-setup.exe"
+```
+
+### macOS
+
+macOS 11+, Intel and Apple Silicon, with [Homebrew](https://brew.sh):
+
+```bash
+brew install --cask alxbdn/ezreader/ezreader
+```
+
+### Linux
+
+x64. On Debian, Ubuntu and derivatives, this downloads the latest package and installs it:
+
+```bash
+curl -sL https://api.github.com/repos/alxbdn/EzReader/releases/latest | grep -o 'https://[^"]*_amd64\.deb' | xargs curl -LO
+sudo apt install ./ezreader_*_amd64.deb
+```
+
+On any other distribution, the portable app needs nothing installed:
+
+```bash
+curl -sL https://api.github.com/repos/alxbdn/EzReader/releases/latest | grep -o 'https://[^"]*-linux-x64"' | tr -d '"' | xargs curl -L -o ezreader
+chmod +x ezreader && ./ezreader
+```
+
+The welcome screen shows whether your version is up to date: a green check, or a red cross and an *Update* button that installs the new version (the Store version opens the Microsoft Store). You can also update by hand: `winget upgrade --id 9P9PVN4DRVS8`, `brew upgrade --cask ezreader`, or run the same GitHub commands again.
+
+### Download the files
+
+Prefer to download? **[Get the latest release](https://github.com/alxbdn/EzReader/releases/latest)**, about 3 MB, and pick the file for your system.
+
+| System | File | What it is |
+|--------|------|------------|
+| **Windows** | `ezreader-<version>-win-x64-setup.exe` | Installer |
+| | `ezreader-portable-<version>-win-x64.exe` | Portable app: a single file you can run from anywhere |
+| **macOS** | `ezreader-<version>-macos-universal.dmg` | Disk image |
+| **Linux** | `ezreader_<version>_amd64.deb` | Package for Debian, Ubuntu and derivatives |
+| | `ezreader-portable-<version>-linux-x64` | Portable app: make it executable (`chmod +x`) and run it |
+
+The macOS app is not notarized by Apple: installed with Homebrew it opens straight away; from the disk image, right-click EzReader in Applications and choose **Open** the first time.
+
+Each release also carries **[`ezreader-reports.zip`](https://github.com/alxbdn/EzReader/releases/latest/download/ezreader-reports.zip)**, which holds its security report, its performance report and the **software bills of materials** (CycloneDX) of its dependencies, and its signed **build provenance** ([SLSA](https://slsa.dev), `.intoto.jsonl`). To check that a download was built by this repository's release workflow, with the [GitHub CLI](https://cli.github.com):
+
+```bash
+gh attestation verify <downloaded file> --repo alxbdn/EzReader
+```
+
+### Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org). Only the Windows files built by this repository's release workflow are signed; who approves each signing, and how, is set out in the [code signing policy](CODE_SIGNING.md).
 
 ---
 
@@ -84,20 +159,12 @@ Extracted, split and rearranged files contain nothing from the pages you left ou
 
 - **Export** pages as PNG or JPEG images (96, 150 or 300 dpi), or as a flattened PDF copy, with or without annotations
 - **Convert** the text of a PDF to Word (.docx), Excel (.xlsx, one sheet per page), RTF, a web page (HTML), plain text or XML. Paragraphs, titles and tables are kept; pictures and the exact layout are not
-- **Recognize text (OCR)** in scanned pages and pictures using the OCR engine built into Windows or Tesseract (`tesseract-ocr`) on Linux: the page on the left with the words found outlined, the text on the right, ready to copy. It uses the language packs installed on your system without inflating the app's size
+- **Select text in scans and pictures**: pages without text are read in the background by the OCR engine built into the system, and their words become selectable and copyable like any text. Only the pages on screen are read, once each, on your computer.
+- **Recognize text (OCR)** in scanned pages and pictures with the OCR engine built into Windows: the page on the left with the words found outlined, the text on the right, ready to copy. It reads the languages installed in Windows and adds nothing to the app's size. On macOS it uses the engine built into macOS (Vision) the same way. On Linux, the PaddleOCR models (RapidOCR) are built into the app: languages written in the Latin alphabet, nothing to install
 - **Images to PDF**: turn a set of pictures into a PDF, one picture per page
 - **Compress** with a Lossless, Balanced or Maximum preset, or give a target size and let EzReader find the best quality under it. The estimated result is shown before you save
 - **Password**: protect a PDF with a password (with a strength meter and tips), open protected PDFs, or remove the protection
 - **Print** with a choice of printer, pages, copies, orientation and scale
-
-### Privacy and security
-
-Full details in the [privacy policy](PRIVACY.md).
-
-- No account, no AI, no telemetry: EzReader never sends your documents or usage anywhere
-- PDFs open in a locked-down viewer: document scripts never run, and the page cannot reach the network
-- The app only reads and writes the files you open or pick in a dialog
-- Its temporary copies, including decrypted ones, are removed when you close it, or on the next start after a crash
 
 ### Settings and system integration
 
@@ -105,16 +172,38 @@ Full details in the [privacy policy](PRIVACY.md).
 - Default zoom when a file opens
 - Page brightness, remembered between sessions
 - 20 interface languages, switched instantly: English, Français, 中文, हिन्दी, Español, العربية, বাংলা, Русский, Português, اردو, Bahasa Indonesia, Deutsch, 日本語, Kiswahili, मराठी, తెలుగు, Türkçe, தமிழ், Tiếng Việt, 한국어
-- Set EzReader as the default PDF viewer from Settings (registry on Windows without administrator rights, XDG `.desktop` / `xdg-mime` on Linux)
-- Print from the command line: `ezreader-portable.exe --print file.pdf` (Windows) or `ezreader-portable --print file.pdf` (Linux)
+- On Windows, set EzReader as the default PDF viewer from Settings, no administrator rights needed
+- Print from the command line: `ezreader-portable.exe --print file.pdf`
+
+---
+
+## Security and privacy
+
+EzReader never sends your documents or your usage anywhere. Full details in the [privacy policy](PRIVACY.md).
+
+- No account, no AI, no telemetry
+- One request on its own: the latest version number, from GitHub, at startup
+- PDFs open in a locked-down viewer: document scripts never run, and the page cannot reach the network
+- The app only reads and writes the files you open or pick in a dialog
+- Its temporary copies, including decrypted ones, are removed when you close it, or on the next start after a crash
+
+Every push, every pull request and every week, GitHub Actions checks the code:
+
+| Check | Tool |
+|-------|------|
+| Known vulnerabilities in dependencies (SCA) | `npm audit`, `cargo deny` (RustSec advisories, licenses, sources) |
+| Static analysis (SAST) | CodeQL `security-extended` on TypeScript, Rust and the workflows |
+| Dynamic testing | Fuzzing of the PDF and picture parsers with cargo-fuzz (libFuzzer) |
+| Load test | A 1,500-page PDF opened, scrolled and zoomed while memory and CPU are measured |
+| Supply chain | Dependabot updates, third-party actions pinned to a commit, [OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/alxbdn/EzReader) |
+
+The results of each release are attached to it as PDF reports, in [`ezreader-reports.zip`](https://github.com/alxbdn/EzReader/releases/latest/download/ezreader-reports.zip) with the SBOMs. To report a vulnerability privately, see [SECURITY.md](SECURITY.md). Why the design holds: the [security assurance case](docs/security/assurance-case.md). Self-assessment against the OWASP Desktop App Security Top 10: [docs/security](docs/security/owasp-desktop-top10.md). How EzReader stands against the EU Cyber Resilience Act: [docs/cra](docs/cra/README.md).
 
 ---
 
 ## Build from source
 
-EzReader is built with Rust, TypeScript and [Tauri 2](https://tauri.app). You need Rust (stable), Node.js 18 or later, and:
-- **Windows**: Visual Studio C++ Build Tools.
-- **Ubuntu / Debian Linux**: `libwebkit2gtk-4.1-dev`, `librsvg2-dev`, `patchelf`, `tesseract-ocr`, `cups-client`, `xdg-utils`.
+EzReader is built with Rust, TypeScript and [Tauri 2](https://tauri.app). You need Rust (stable), Node.js 18 or later, and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your system.
 
 ```bash
 npm install
@@ -125,12 +214,12 @@ npm run tauri build    # build the release app
 The frontend lives in `src/` and the Rust backend in `src-tauri/`. Before opening a pull request, run the checks that CI runs:
 
 ```bash
-npx tsc --noEmit
+npm run build
 npm test
-cd src-tauri && cargo clippy -- -D warnings && cargo test
+cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-Bug reports and ideas are welcome in the [issues](https://github.com/alxbdn/EzReader/issues).
+Bug reports and ideas are welcome in the [issues](https://github.com/alxbdn/EzReader/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) to send a change, [docs/architecture.md](docs/architecture.md) for how the code is organized, [ROADMAP.md](ROADMAP.md) for what comes next, [GOVERNANCE.md](GOVERNANCE.md) for who decides what, and the [code of conduct](CODE_OF_CONDUCT.md).
 
 ---
 
@@ -140,4 +229,4 @@ EzReader started as a fork of [PDF Rider](https://github.com/pleymor/pdf-rider) 
 
 PDF rendering uses [PDF.js](https://mozilla.github.io/pdf.js/) by Mozilla.
 
-EzReader is released under the MIT license. See [LICENSE](LICENSE) for details.
+EzReader is released under the [MIT license](LICENSE).
